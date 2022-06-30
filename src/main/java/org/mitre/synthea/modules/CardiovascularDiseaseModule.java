@@ -14,6 +14,7 @@ import org.mitre.synthea.helpers.Attributes.Inventory;
 import org.mitre.synthea.helpers.Utilities;
 import org.mitre.synthea.world.agents.Person;
 import org.mitre.synthea.world.concepts.ClinicianSpecialty;
+import org.mitre.synthea.world.concepts.HealthRecord;
 import org.mitre.synthea.world.concepts.HealthRecord.Code;
 import org.mitre.synthea.world.concepts.HealthRecord.Encounter;
 import org.mitre.synthea.world.concepts.HealthRecord.EncounterType;
@@ -546,7 +547,7 @@ public final class CardiovascularDiseaseModule extends Module {
           0.78, 0.84 } };
 
   // the index for each range corresponds to the number of points
-  private static final int[][] age_stroke = { 
+  private static final int[][] age_stroke = {
       { 54, 57, 60, 63, 66, 69, 73, 76, 79, 82, 85 }, // male
       { 54, 57, 60, 63, 65, 68, 71, 74, 77, 79, 82 } // female
   };
@@ -627,7 +628,7 @@ public final class CardiovascularDiseaseModule extends Module {
     strokePoints += getIndexForValueInRangelist(age, age_stroke[genderIndex]);
 
     int bp = bloodPressure.intValue();
-    
+
     if ((Boolean) person.attributes.getOrDefault("blood_pressure_controlled", false)) {
       strokePoints += getIndexForValueInRangelist(bp, treated_sys_bp_stroke[genderIndex]);
     } else {
@@ -757,7 +758,11 @@ public final class CardiovascularDiseaseModule extends Module {
 
   private static void prescribeMedication(String med, Person person, long time, boolean chronic) {
     Medication entry = person.record.medicationStart(time, med, chronic);
-    entry.codes.add(LOOKUP.get(med));
+    HealthRecord.Code medicationCode = LOOKUP.get(med);
+    if (! entry.containsCode(medicationCode.code, medicationCode.system)) {
+      entry.codes.add(medicationCode);
+    }
+
     // increment number of prescriptions prescribed
     Encounter encounter = (Encounter) person.attributes.get(CVD_ENCOUNTER);
     if (encounter != null) {
@@ -780,7 +785,9 @@ public final class CardiovascularDiseaseModule extends Module {
           && !person.record.present.containsKey(diagnosis)) {
         Code code = LOOKUP.get(diagnosis);
         Entry conditionEntry = person.record.conditionStart(time, code.display);
-        conditionEntry.codes.add(code);
+        if (! conditionEntry.containsCode(code.code, code.system)) {
+          conditionEntry.codes.add(code);
+        }
       }
     }
 
@@ -863,7 +870,7 @@ public final class CardiovascularDiseaseModule extends Module {
 
   /**
    * Get all of the Codes this module uses, for inventory purposes.
-   * 
+   *
    * @return Collection of all codes and concepts this module uses
    */
   public static Collection<Code> getAllCodes() {

@@ -103,7 +103,7 @@ public class ClinicalNoteExporter {
       }
     }
 
-    Payer payer = person.getPayerAtTime(encounter.start);
+    Payer payer = person.coverage.getPayerAtTime(encounter.start);
     if (payer == null) {
       person.attributes.put("ehr_insurance", "unknown insurance coverage");
     } else {
@@ -130,8 +130,8 @@ public class ClinicalNoteExporter {
     person.attributes.put("ehr_imaging_studies", encounter.imagingStudies);
     person.attributes.put("time", encounter.start);
     if (person.attributes.containsKey(LifecycleModule.QUIT_SMOKING_AGE)) {
-      person.attributes.put("quit_smoking_age", 
-          person.attributes.get(LifecycleModule.QUIT_SMOKING_AGE));      
+      person.attributes.put("quit_smoking_age",
+          person.attributes.get(LifecycleModule.QUIT_SMOKING_AGE));
     }
     person.attributes.put("race_lookup", RaceAndEthnicity.LOOK_UP_CDC_RACE);
     person.attributes.put("ethnicity_lookup", RaceAndEthnicity.LOOK_UP_CDC_ETHNICITY_CODE);

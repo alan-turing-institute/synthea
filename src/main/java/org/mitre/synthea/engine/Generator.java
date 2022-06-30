@@ -12,7 +12,7 @@ import java.io.FilenameFilter;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.lang.reflect.Type;
-
+import java.nio.file.Path;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -32,7 +32,6 @@ import org.apache.commons.io.IOCase;
 import org.apache.commons.io.filefilter.WildcardFileFilter;
 import org.apache.commons.lang3.StringUtils;
 
-import org.mitre.synthea.datastore.DataStore;
 import org.mitre.synthea.editors.GrowthDataErrorsEditor;
 import org.mitre.synthea.export.CDWExporter;
 import org.mitre.synthea.export.Exporter;
@@ -59,7 +58,11 @@ import org.mitre.synthea.world.geography.Location;
  */
 public class Generator implements RandomNumberGenerator {
 
-  public DataStore database;
+  /**
+   * Unique ID for this instance of the Generator.
+   * Even if the same settings are used multiple times, this ID should be unique.
+   */
+  public final UUID id = UUID.randomUUID();
   public GeneratorOptions options;
   private Random random;
   public long timestep;
@@ -67,15 +70,18 @@ public class Generator implements RandomNumberGenerator {
   public long referenceTime;
   public Map<String, AtomicInteger> stats;
   public Location location;
-  private AtomicInteger totalGeneratedPopulation;
+  public AtomicInteger totalGeneratedPopulation;
   private String logLevel;
   private boolean onlyAlivePatients;
   private boolean onlyDeadPatients;
   private boolean onlyVeterans;
+  private Module keepPatientsModule;
+  private Long maxAttemptsToKeepPatient;
   public TransitionMetrics metrics;
   public static String DEFAULT_STATE = "Massachusetts";
   private Exporter.ExporterRuntimeOptions exporterRuntimeOptions;
   private List<FixedRecordGroup> recordGroups;
+  public final int threadPoolSize;
 
   /**
    * Used only for testing and debugging. Populate this field to keep track of all patients
@@ -89,7 +95,7 @@ public class Generator implements RandomNumberGenerator {
    * module. Use "-m filename" on the command line to filter which modules get loaded.
    */
   Predicate<String> modulePredicate;
-  
+
   private static final String TARGET_AGE = "target_age";
 
   /**
@@ -97,9 +103,17 @@ public class Generator implements RandomNumberGenerator {
    * This class provides the default values for Generator, or alternatives may be set.
    */
   public static class GeneratorOptions {
-    public int population = Integer.parseInt(Config.get("generate.default_population", "1"));
-    public long seed = System.currentTimeMillis();
-    public long clinicianSeed = seed;
+    public int population = Config.getAsInteger("generate.default_population", 1);
+    public int threadPoolSize = Config.getAsInteger("generate.thread_pool_size", -1);
+    /** Reference Time when to start Synthea. By default equal to the current system time. */
+    public long referenceTime = System.currentTimeMillis();
+    /** End time of Synthea simulation. By default equal to the current system time. */
+    public long endTime = referenceTime;
+    /** Actual time the run started. */
+    public final long runStartTime = referenceTime;
+    /** By default use the current time as random seed. */
+    public long seed = referenceTime;
+    public long clinicianSeed = referenceTime;
     /** Population as exclusively live persons or including deceased.
      * True for live, false includes deceased */
     public boolean overflow = true;
@@ -126,10 +140,10 @@ public class Generator implements RandomNumberGenerator {
      *  value of -1 will evolve the population to the current system time.
      */
     public int daysToTravelForward = -1;
-    /** Reference Time when to start Synthea. By default equal to the current system time. */
-    public long referenceTime = seed;
+    /** Path to a module defining which patients should be kept and exported. */
+    public File keepPatientsModulePath;
   }
-  
+
   /**
    * Create a Generator, using all default settings.
    */
@@ -140,7 +154,7 @@ public class Generator implements RandomNumberGenerator {
   /**
    * Create a Generator, with the given population size.
    * All other settings are left as defaults.
-   * 
+   *
    * @param population Target population size
    */
   public Generator(int population) {
@@ -148,11 +162,11 @@ public class Generator implements RandomNumberGenerator {
     options.population = population;
     init();
   }
-  
+
   /**
    * Create a Generator, with the given population size and seed.
    * All other settings are left as defaults.
-   * 
+   *
    * @param population Target population size
    * @param seed Seed used for randomness
    */
@@ -171,7 +185,7 @@ public class Generator implements RandomNumberGenerator {
   public Generator(GeneratorOptions o) {
     this(o, new Exporter.ExporterRuntimeOptions());
   }
-  
+
   /**
    * Create a Generator, with the given options.
    * @param o Desired configuration options
@@ -184,28 +198,18 @@ public class Generator implements RandomNumberGenerator {
       exporterRuntimeOptions.deferExports = true;
       internalStore = Collections.synchronizedList(new LinkedList<>());
     }
+    if (options.threadPoolSize == -1) {
+      threadPoolSize = Runtime.getRuntime().availableProcessors();
+    } else if (options.threadPoolSize > 0) {
+      threadPoolSize = options.threadPoolSize;
+    } else {
+      throw new IllegalArgumentException(String.format(
+              "Illegal thread pool size (%d)", options.threadPoolSize));
+    }
     init();
   }
 
   private void init() {
-    String dbType = Config.get("generate.database_type");
-
-    switch (dbType) {
-      case "in-memory":
-        this.database = new DataStore(false);
-        break;
-      case "file":
-        this.database = new DataStore(true);
-        break;
-      case "none":
-        this.database = null;
-        break;
-      default:
-        throw new IllegalArgumentException(
-            "Unexpected value for config setting generate.database_type: '" + dbType
-                + "' . Valid values are file, in-memory, or none.");
-    }
-
     if (options.state == null) {
       options.state = DEFAULT_STATE;
     }
@@ -216,7 +220,7 @@ public class Generator implements RandomNumberGenerator {
 
     this.random = new Random(options.seed);
     this.timestep = Long.parseLong(Config.get("generate.timestep"));
-    this.stop = System.currentTimeMillis();
+    this.stop = options.endTime;
     this.referenceTime = options.referenceTime;
 
     this.location = new Location(options.state, options.city);
@@ -231,6 +235,18 @@ public class Generator implements RandomNumberGenerator {
       Config.set("generate.only_alive_patients", "false");
       this.onlyDeadPatients = false;
       this.onlyAlivePatients = false;
+    }
+
+    try {
+      this.maxAttemptsToKeepPatient = Long.parseLong(
+        Config.get("generate.max_attempts_to_keep_patient", "1000"));
+
+      if (this.maxAttemptsToKeepPatient == 0) {
+        // set it to null to make the check more clear
+        this.maxAttemptsToKeepPatient = null;
+      }
+    } catch (Exception e) {
+      this.maxAttemptsToKeepPatient = null;
     }
 
     this.onlyVeterans = Config.getAsBoolean("generate.veteran_population_override");
@@ -254,9 +270,19 @@ public class Generator implements RandomNumberGenerator {
       Module.addModules(options.localModuleDir);
     }
     List<String> coreModuleNames = getModuleNames(Module.getModules(path -> false));
-    List<String> moduleNames = getModuleNames(Module.getModules(modulePredicate)); 
+    List<String> moduleNames = getModuleNames(Module.getModules(modulePredicate));
+
+    if (options.keepPatientsModulePath != null) {
+      try {
+        Path path = options.keepPatientsModulePath.toPath().toAbsolutePath();
+        this.keepPatientsModule = Module.loadFile(path, false, null, true);
+      } catch (Exception e) {
+        throw new ExceptionInInitializerError(e);
+      }
+    }
+
     Costs.loadCostData(); // ensure cost data loads early
-    
+
     String locationName;
     if (options.city == null) {
       locationName = options.state;
@@ -296,7 +322,7 @@ public class Generator implements RandomNumberGenerator {
             .map(m -> m.name)
             .collect(Collectors.toList());
   }
-  
+
   /**
    * Generate the population, using the currently set configuration settings.
    */
@@ -311,7 +337,7 @@ public class Generator implements RandomNumberGenerator {
       Config.set("generate.append_numbers_to_person_names", "false");
     }
 
-    ExecutorService threadPool = Executors.newFixedThreadPool(8);
+    ExecutorService threadPool = Executors.newFixedThreadPool(threadPoolSize);
 
     if (options.initialPopulationSnapshotPath != null) {
       FileInputStream fis = null;
@@ -327,12 +353,12 @@ public class Generator implements RandomNumberGenerator {
       if (initialPopulation != null && initialPopulation.size() > 0) {
         // default is to run until current system time.
         if (options.daysToTravelForward > 0) {
-          stop = initialPopulation.get(0).lastUpdated 
+          stop = initialPopulation.get(0).lastUpdated
                   + Utilities.convertTime("days", options.daysToTravelForward);
         }
         for (int i = 0; i < initialPopulation.size(); i++) {
           final int index = i;
-          final Person p = initialPopulation.get(i);        
+          final Person p = initialPopulation.get(i);
           threadPool.submit(() -> updateRecordExportPerson(p, index));
         }
       }
@@ -353,12 +379,6 @@ public class Generator implements RandomNumberGenerator {
     } catch (InterruptedException e) {
       System.out.println("Generator interrupted. Attempting to shut down associated thread pool.");
       threadPool.shutdownNow();
-    }
-
-    // have to store providers at the end to correctly capture utilization #s
-    // TODO - de-dup hospitals if using a file-based database?
-    if (database != null) {
-      database.store(Provider.getProviderList());
     }
 
     // Save a snapshot of the generated population using Java Serialization
@@ -387,7 +407,7 @@ public class Generator implements RandomNumberGenerator {
   /**
    * Imports the fixed demographics records file when using fixed patient
    * demographics.
-   * 
+   *
    * @return A list of the groups of records imported.
    */
   public List<FixedRecordGroup> importFixedPatientDemographicsFile() {
@@ -409,14 +429,14 @@ public class Generator implements RandomNumberGenerator {
     // Return the record groups.
     return recordGroups;
   }
-  
+
   /**
    * Generate a completely random Person. The returned person will be alive at the end of the
    * simulation. This means that if in the course of the simulation the person dies, a new person
-   * will be started to replace them. 
+   * will be started to replace them.
    * The seed used to generate the person is randomized as well.
    * Note that this method is only used by unit tests.
-   * 
+   *
    * @param index Target index in the whole set of people to generate
    * @return generated Person
    */
@@ -432,7 +452,7 @@ public class Generator implements RandomNumberGenerator {
    * person will be started to replace them. Note also that if the person dies, the seed to produce
    * them can't be re-used (otherwise the new person would die as well) so a new seed is picked,
    * based on the given seed.
-   * 
+   *
    * @param index
    *          Target index in the whole set of people to generate
    * @param personSeed
@@ -442,9 +462,8 @@ public class Generator implements RandomNumberGenerator {
   public Person generatePerson(int index, long personSeed) {
 
     Person person = null;
-    
+
     try {
-      boolean isAlive = true;
       int tryNumber = 0; // Number of tries to create these demographics
       Random randomForDemographics = new Random(personSeed);
 
@@ -454,56 +473,52 @@ public class Generator implements RandomNumberGenerator {
         demoAttributes = pickFixedDemographics(index, random);
       }
 
-      int providerCount = 0;
-      int providerMinimum = 1;
+      boolean patientMeetsCriteria;
 
-      if (this.recordGroups != null) {
-        // If fixed records are used, there must be 1 provider for each of this person's records.
-        FixedRecordGroup recordGroup = this.recordGroups.get(index);
-        providerMinimum = recordGroup.count;
-      }
-      
       do {
+        tryNumber++;
         person = createPerson(personSeed, demoAttributes);
         long finishTime = person.lastUpdated + timestep;
 
-        isAlive = person.alive(finishTime);
-        providerCount = person.providerCount();
+        boolean isAlive = person.alive(finishTime);
 
-        if (isAlive && onlyDeadPatients) {
-          // rotate the seed so the next attempt gets a consistent but different one
-          personSeed = randomForDemographics.nextLong();
-          continue;
-          // skip the other stuff if the patient is alive and we only want dead patients
-          // note that this skips ahead to the while check and doesn't automatically re-loop
-        }
+        CriteriaCheck check = checkCriteria(person, finishTime, index, isAlive);
+        patientMeetsCriteria = check.meetsCriteria();
 
-        if (!isAlive && onlyAlivePatients) {
-          // rotate the seed so the next attempt gets a consistent but different one
-          personSeed = randomForDemographics.nextLong();
-          continue;
-          // skip the other stuff if the patient is dead and we only want alive patients
-          // note that this skips ahead to the while check and doesn't automatically re-loop
-        }
-
-        // For fixed records, the person must have 1 provider per record.
-        if (providerCount < providerMinimum) {
-          // rotate the seed so the next attempt gets a consistent but different one
-          personSeed = new Random(personSeed).nextLong();
-          tryNumber++;
-          if (tryNumber > 10) {
-            System.out.println("Couldn't get enough providers for "
-                + person.attributes.get(Person.FIRST_NAME) + " "
-                + person.attributes.get(Person.LAST_NAME));
+        if (!patientMeetsCriteria) {
+          if (this.maxAttemptsToKeepPatient != null
+              && tryNumber >= this.maxAttemptsToKeepPatient) {
+            // we've tried and failed to produce a patient that meets the criteria
+            // throw an exception to halt processing in this slot
+            String msg = "Failed to produce a matching patient after "
+                + tryNumber + " attempts. "
+                + "Ensure that it is possible for all "
+                + "requested demographics to meet the criteria. "
+                + "(e.g., make sure there is no age restriction "
+                + "that conflicts with a requested condition, "
+                + "such as limiting age to 0-18 and requiring "
+                + "all patients have a condition that only onsets after 55.) "
+                + "If you are confident that the constraints"
+                + " are possible to satisfy but rare, "
+                + "consider increasing the value in config setting "
+                + "`generate.max_attempts_to_keep_patient`";
+            throw new RuntimeException(msg);
           }
-          continue;
-          // skip the other stuff if the patient has less providers than the minimum
-          // note that this skips ahead to the while check and doesn't automatically re-loop
+
+          // this should be false for any clauses in checkCriteria below
+          // when we want to export this patient, but keep trying to produce one meeting criteria
+          if (!check.exportAnyway()) {
+            // rotate the seed so the next attempt gets a consistent but different one
+            personSeed = randomForDemographics.nextLong();
+            continue;
+            // skip the other stuff if the patient doesn't meet our goals
+            // note that this skips ahead to the while check
+            // also note, this may run forever if the requested criteria are impossible to meet
+          }
         }
 
         recordPerson(person, index);
 
-        tryNumber++;
         if (!isAlive) {
           // rotate the seed so the next attempt gets a consistent but different one
           personSeed = randomForDemographics.nextLong();
@@ -526,7 +541,7 @@ public class Generator implements RandomNumberGenerator {
         // TODO - export is DESTRUCTIVE when it filters out data
         // this means export must be the LAST THING done with the person
         Exporter.export(person, finishTime, exporterRuntimeOptions);
-      } while (!patientMeetsCriteria(isAlive, providerCount, providerMinimum));
+      } while (!patientMeetsCriteria);
       //repeat while patient doesn't meet criteria
       // if the patient is alive and we want only dead ones => loop & try again
       //  (and dont even export, see above)
@@ -541,37 +556,83 @@ public class Generator implements RandomNumberGenerator {
     }
     return person;
   }
-  
+
+  /**
+   * Helper class to keep track of patient criteria.
+   * Caches results in booleans so different combinations are quick to check
+   */
+  private static class CriteriaCheck {
+    // see checkCriteria below for notes on these flags
+    // reminder that java booleans default to false if unset
+    private boolean rejectDeadButOverflow;
+    private boolean isAliveButDeadRequired;
+    private boolean isDeadButAliveRequired;
+    private boolean insufficientProviders;
+    private boolean failedKeepModule;
+
+    private boolean meetsCriteria() {
+      // if any of the flags are true, the patient does not meet criteria
+      return !(rejectDeadButOverflow
+        || isAliveButDeadRequired
+        || isDeadButAliveRequired
+        || insufficientProviders
+        || failedKeepModule);
+    }
+
+    private boolean exportAnyway() {
+      // export anyway if rejectDeadButOverflow is the only one that is true
+      // (ie. if all the other flags are false)
+      return !isAliveButDeadRequired
+        && !isDeadButAliveRequired
+        && !insufficientProviders
+        && !failedKeepModule;
+    }
+  }
+
   /**
    * Determines if a patient meets the requested criteria.
    * If a patient does not meet the criteria the process will be repeated so a new one is generated
+   * @param person the patient to check if we want to export them
+   * @param finishTime the time simulation finished
+   * @param index Target index in the whole set of people to generate
    * @param isAlive Whether the patient is alive at end of simulation.
-   * @param providerCount Number of providers in the patient's record
-   * @param providerMinimum Minimum number of providers required
-   * @return true if patient meets criteria, false otherwise
+   * @return CriteriaCheck to determine if the patient should be exported/re-simulated
    */
-  public boolean patientMeetsCriteria(boolean isAlive, int providerCount, int providerMinimum) {
-    if (!isAlive && !onlyDeadPatients && this.options.overflow) { 
-      // if patient is not alive and the criteria isn't dead patients new patient is needed
-      return false;
+  public CriteriaCheck checkCriteria(Person person, long finishTime, int index, boolean isAlive) {
+    CriteriaCheck check = new CriteriaCheck();
+
+    check.rejectDeadButOverflow = !isAlive && !onlyDeadPatients && this.options.overflow;
+    // if patient is not alive and the criteria isn't dead patients new patient is needed
+    // however in this one case we still want to export the patient
+
+    check.isAliveButDeadRequired = isAlive && onlyDeadPatients;
+    // if patient is alive and the criteria is dead patients new patient is needed
+
+    check.isDeadButAliveRequired = !isAlive && onlyAlivePatients;
+    // if patient is not alive and the criteria is alive patients new patient is needed
+
+    int providerCount = person.providerCount();
+    int providerMinimum = 1;
+
+    if (this.recordGroups != null) {
+      // If fixed records are used, there must be 1 provider for each of this person's records.
+      FixedRecordGroup recordGroup = this.recordGroups.get(index);
+      providerMinimum = recordGroup.count;
     }
 
-    if (isAlive && onlyDeadPatients) {
-      // if patient is alive and the criteria is dead patients new patient is needed
-      return false;
+    check.insufficientProviders = providerCount < providerMinimum;
+    // if provider count less than provider min new patient is needed
+
+    if (this.keepPatientsModule != null) {
+      // this one might be slow to process, so only do it if the other things are true
+      if (!check.isAliveButDeadRequired && !check.isDeadButAliveRequired) {
+        this.keepPatientsModule.process(person, finishTime, false);
+        State terminal = person.history.get(0);
+        check.failedKeepModule = !terminal.name.equals("Keep");
+      }
     }
 
-    if (!isAlive && onlyAlivePatients) {
-      // if patient is not alive and the criteria is alive patients new patient is needed
-      return false;
-    }
-
-    if (providerCount < providerMinimum) {
-      // if provider count less than provider min new patient is needed
-      return false;
-    }
-
-    return true;
+    return check;
   }
 
   /**
@@ -598,6 +659,7 @@ public class Generator implements RandomNumberGenerator {
     person.attributes.putAll(demoAttributes);
     person.attributes.put(Person.LOCATION, location);
     person.lastUpdated = (long) demoAttributes.get(Person.BIRTHDATE);
+    location.setSocialDeterminants(person);
 
     LifecycleModule.birth(person, person.lastUpdated);
     person.currentModules = Module.getModules(modulePredicate);
@@ -657,7 +719,7 @@ public class Generator implements RandomNumberGenerator {
    * @param isAlive Whether the person to print is alive.
    */
   private synchronized void writeToConsole(Person person, int index, long time, boolean isAlive) {
-    // this is synchronized to ensure all lines for a single person are always printed 
+    // this is synchronized to ensure all lines for a single person are always printed
     // consecutively
     String deceased = isAlive ? "" : "DECEASED";
     System.out.format("%d -- %s (%d y/o %s) %s, %s %s\n", index + 1,
@@ -729,6 +791,8 @@ public class Generator implements RandomNumberGenerator {
     demographicsOutput.put(Person.INCOME, income);
     double incomeLevel = city.incomeLevel(income);
     demographicsOutput.put(Person.INCOME_LEVEL, incomeLevel);
+    double povertyRatio = city.povertyRatio(income);
+    demographicsOutput.put(Person.POVERTY_RATIO, povertyRatio);
 
     double occupation = random.nextDouble();
     demographicsOutput.put(Person.OCCUPATION_LEVEL, occupation);
@@ -744,7 +808,7 @@ public class Generator implements RandomNumberGenerator {
     // Generate the person's age data.
     int targetAge;
     if (options.ageSpecified) {
-      targetAge = 
+      targetAge =
           (int) (options.minAge + ((options.maxAge - options.minAge) * random.nextDouble()));
     } else {
       targetAge = city.pickAge(random);
@@ -753,7 +817,7 @@ public class Generator implements RandomNumberGenerator {
 
     long birthdate = birthdateFromTargetAge(targetAge, random);
     demographicsOutput.put(Person.BIRTHDATE, birthdate);
-    
+
     // Return the generated demographics.
     return demographicsOutput;
   }
@@ -800,7 +864,7 @@ public class Generator implements RandomNumberGenerator {
   private long birthdateFromTargetAge(long targetAge, Random random) {
     long earliestBirthdate = referenceTime - TimeUnit.DAYS.toMillis((targetAge + 1) * 365L + 1);
     long latestBirthdate = referenceTime - TimeUnit.DAYS.toMillis(targetAge * 365L);
-    return 
+    return
         (long) (earliestBirthdate + ((latestBirthdate - earliestBirthdate) * random.nextDouble()));
   }
 
@@ -813,10 +877,6 @@ public class Generator implements RandomNumberGenerator {
   public void recordPerson(Person person, int index) {
     long finishTime = person.lastUpdated + timestep;
     boolean isAlive = person.alive(finishTime);
-    
-    if (database != null) {
-      database.store(person);
-    }
 
     if (internalStore != null) {
       internalStore.add(person);
@@ -837,12 +897,12 @@ public class Generator implements RandomNumberGenerator {
 
     totalGeneratedPopulation.incrementAndGet();
   }
-  
+
   private Predicate<String> getModulePredicate() {
     if (options.enabledModules == null) {
       return path -> true;
     }
-    FilenameFilter filenameFilter = new WildcardFileFilter(options.enabledModules, 
+    FilenameFilter filenameFilter = new WildcardFileFilter(options.enabledModules,
         IOCase.INSENSITIVE);
     return path -> filenameFilter.accept(null, path);
   }
@@ -888,12 +948,12 @@ public class Generator implements RandomNumberGenerator {
   public long randLong() {
     return random.nextLong();
   }
-  
+
   /**
    * Return a random UUID.
    */
   public UUID randUUID() {
     return new UUID(randLong(), randLong());
   }
-  
+
 }

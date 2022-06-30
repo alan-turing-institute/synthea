@@ -1,10 +1,12 @@
 package org.mitre.synthea.export;
 
-import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.parser.IParser;
 
+import java.io.BufferedWriter;
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
+import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -15,6 +17,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.function.Predicate;
 import org.apache.commons.lang3.tuple.ImmutablePair;
@@ -27,13 +30,14 @@ import org.mitre.synthea.input.FixedRecord;
 import org.mitre.synthea.input.FixedRecordGroup;
 import org.mitre.synthea.modules.DeathModule;
 import org.mitre.synthea.world.agents.Person;
+import org.mitre.synthea.world.concepts.Claim;
 import org.mitre.synthea.world.concepts.HealthRecord;
 import org.mitre.synthea.world.concepts.HealthRecord.Encounter;
 import org.mitre.synthea.world.concepts.HealthRecord.Observation;
 import org.mitre.synthea.world.concepts.HealthRecord.Report;
 
 public abstract class Exporter {
-  
+
   /**
    * Supported FHIR versions.
    */
@@ -42,26 +46,31 @@ public abstract class Exporter {
     STU3,
     R4
   }
-  
-  private static final List<Pair<Person, Long>> deferredExports = 
+
+  private static final List<Pair<Person, Long>> deferredExports =
           Collections.synchronizedList(new LinkedList<>());
+
+  private static final ConcurrentHashMap<Path, PrintWriter> fileWriters =
+          new ConcurrentHashMap<Path, PrintWriter>();
+
+  private static final int FILE_BUFFER_SIZE = 4 * 1024 * 1024;
 
   /**
    * Runtime configuration of the record exporter.
    */
   public static class ExporterRuntimeOptions {
-    
+
     public int yearsOfHistory;
     public boolean deferExports = false;
     public boolean terminologyService =
         !Config.get("generate.terminology_service_url", "").isEmpty();
     private BlockingQueue<String> recordQueue;
     private SupportedFhirVersion fhirVersion;
-    
+
     public ExporterRuntimeOptions() {
       yearsOfHistory = Integer.parseInt(Config.get("exporter.years_of_history"));
     }
-    
+
     /**
      * Copy constructor.
      */
@@ -72,7 +81,7 @@ public abstract class Exporter {
       recordQueue = init.recordQueue;
       fhirVersion = init.fhirVersion;
     }
-    
+
     /**
      * Enables a blocking queue to which FHIR patient records will be written.
      * @param version specifies the version of FHIR that will be written to the queue.
@@ -81,17 +90,17 @@ public abstract class Exporter {
       recordQueue = new LinkedBlockingQueue<>(1);
       fhirVersion = version;
     }
-    
+
     public SupportedFhirVersion queuedFhirVersion() {
       return fhirVersion;
     }
-    
+
     public boolean isQueueEnabled() {
       return recordQueue != null;
     }
 
     /**
-     * Returns the newest generated patient record 
+     * Returns the newest generated patient record
      * or blocks until next record becomes available.
      * Returns null if the generator does not have a record queue.
      */
@@ -109,7 +118,7 @@ public abstract class Exporter {
       return recordQueue == null || recordQueue.size() == 0;
     }
   }
-  
+
   /**
    * Export a single patient, into all the formats supported. (Formats may be enabled or disabled by
    * configuration)
@@ -122,9 +131,8 @@ public abstract class Exporter {
     if (options.deferExports) {
       deferredExports.add(new ImmutablePair<Person, Long>(person, stopTime));
     } else {
-      int yearsOfHistory = Integer.parseInt(Config.get("exporter.years_of_history"));
-      if (yearsOfHistory > 0) {
-        person = filterForExport(person, yearsOfHistory, stopTime);
+      if (options.yearsOfHistory > 0) {
+        person = filterForExport(person, options.yearsOfHistory, stopTime);
       }
       if (!person.alive(stopTime)) {
         filterAfterDeath(person);
@@ -151,7 +159,7 @@ public abstract class Exporter {
       }
     }
   }
-  
+
   /**
    * Export a single patient, into all the formats supported. (Formats may be enabled or disabled by
    * configuration). This method variant is only currently used by test classes.
@@ -238,9 +246,23 @@ public abstract class Exporter {
       Path outFilePath = outDirectory.toPath().resolve(filename(person, fileTag, "xml"));
       writeNewFile(outFilePath, ccdaXml);
     }
+    if (Config.getAsBoolean("exporter.json.export")) {
+      String json = JSONExporter.export(person);
+      File outDirectory = getOutputFolder("json", person);
+      Path outFilePath = outDirectory.toPath().resolve(filename(person, fileTag, "json"));
+      writeNewFile(outFilePath, json);
+    }
     if (Config.getAsBoolean("exporter.csv.export")) {
       try {
         CSVExporter.getInstance().export(person, stopTime);
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
+    }
+    if (Config.getAsBoolean("exporter.bfd.export")) {
+      try {
+        BB2RIFExporter exporter = BB2RIFExporter.getInstance();
+        exporter.export(person, stopTime, options.yearsOfHistory);
       } catch (IOException e) {
         e.printStackTrace();
       }
@@ -315,7 +337,7 @@ public abstract class Exporter {
   }
 
   /**
-   * Write a new file with the given contents.
+   * Write a new file with the given contents. Fails if the file already exists.
    * @param file Path to the new file.
    * @param contents The contents of the file.
    */
@@ -328,24 +350,57 @@ public abstract class Exporter {
   }
 
   /**
+   * Overwrite a file with the given contents. If the file doesn't exist it will be created.
+   * @param file Path to the new file.
+   * @param contents The contents of the file.
+   */
+  static void overwriteFile(Path file, String contents) {
+    try {
+      Files.write(file, Collections.singleton(contents), StandardOpenOption.CREATE,
+              StandardOpenOption.TRUNCATE_EXISTING);
+    } catch (IOException e) {
+      e.printStackTrace();
+    }
+  }
+
+  /**
    * Append contents to the end of a file.
    * @param file Path to the new file.
    * @param contents The contents of the file.
    */
-  private static synchronized void appendToFile(Path file, String contents) {
-    try {
-      if (Files.notExists(file)) {
-        Files.createFile(file);
+  static void appendToFile(Path file, String contents) {
+    PrintWriter writer = fileWriters.get(file);
+
+    if (writer == null) {
+      synchronized (fileWriters) {
+        writer = fileWriters.get(file);
+        if (writer == null) {
+          try {
+            writer = new PrintWriter(
+              new BufferedWriter(new FileWriter(file.toFile(), true), FILE_BUFFER_SIZE)
+            );
+          } catch (IOException e) {
+            e.printStackTrace();
+          }
+          fileWriters.put(file, writer);
+        }
       }
-    } catch (Exception e) {
-      // Ignore... multi-threaded race condition to create a file that didn't exist,
-      // but does now because one of the other exporter threads beat us to it.
     }
-    try {
-      Files.write(file, Collections.singleton(contents), StandardOpenOption.APPEND);
-    } catch (IOException e) {
-      e.printStackTrace();
+
+    synchronized (writer) {
+      writer.println(contents);
     }
+  }
+
+  /**
+   * Flushes the data and closes all open files.
+   */
+  private static void closeOpenFiles() {
+    Iterator<PrintWriter> itr = fileWriters.values().iterator();
+    while (itr.hasNext()) {
+      itr.next().close();
+    }
+    fileWriters.clear();
   }
 
   /**
@@ -357,7 +412,7 @@ public abstract class Exporter {
   public static void runPostCompletionExports(Generator generator) {
     runPostCompletionExports(generator, new ExporterRuntimeOptions());
   }
-  
+
   /**
    * Run any exporters that require the full dataset to be generated prior to exporting.
    * (E.g., an aggregate statistical exporter)
@@ -365,7 +420,7 @@ public abstract class Exporter {
    * @param generator Generator that generated the patients
    */
   public static void runPostCompletionExports(Generator generator, ExporterRuntimeOptions options) {
-    
+
     if (options.deferExports) {
       ExporterRuntimeOptions nonDeferredOptions = new ExporterRuntimeOptions(options);
       nonDeferredOptions.deferExports = false;
@@ -374,7 +429,7 @@ public abstract class Exporter {
       }
       deferredExports.clear();
     }
-    
+
     String bulk = Config.get("exporter.fhir.bulk_data");
 
     // Before we force bulk data to be off...
@@ -422,24 +477,13 @@ public abstract class Exporter {
     }
     Config.set("exporter.fhir.bulk_data", bulk);
 
-    if (Config.getAsBoolean("exporter.cost_access_outcomes_report")) {
-      ReportExporter.export(generator);
-    }
-
-    if (Config.getAsBoolean("exporter.prevalence_report")) {
+    if (Config.getAsBoolean("exporter.bfd.export")) {
       try {
-        PrevalenceReport.export(generator);
-      } catch (Exception e) {
-        System.err.println("Prevalence report generation failed!");
-        e.printStackTrace();
-      }
-    }
-
-    if (Config.getAsBoolean("exporter.custom_report")) {
-      try {
-        CustomSqlReport.export(generator);
-      } catch (Exception e) {
-        System.err.println("Custom report generation failed!");
+        BB2RIFExporter exporter = BB2RIFExporter.getInstance();
+        exporter.exportNPIs();
+        exporter.exportManifest();
+        exporter.exportEndState();
+      } catch (IOException e) {
         e.printStackTrace();
       }
     }
@@ -456,6 +500,16 @@ public abstract class Exporter {
         e.printStackTrace();
       }
     }
+
+    if (Config.getAsBoolean("exporter.metadata.export", false)) {
+      try {
+        MetadataExporter.exportMetadata(generator);
+      } catch (IOException e) {
+        e.printStackTrace();
+      }
+    }
+
+    closeOpenFiles();
   }
 
   /**
@@ -504,7 +558,7 @@ public abstract class Exporter {
     Predicate<HealthRecord.Entry> notFutureDated = e -> e.start <= endTime;
 
     for (Encounter encounter : record.encounters) {
-      List<HealthRecord.Entry> claimItems = encounter.claim.items;
+      List<Claim.ClaimEntry> claimItems = encounter.claim.items;
       // keep conditions if still active, regardless of start date
       Predicate<HealthRecord.Entry> conditionActive = c -> record.conditionActive(c.type);
       // or if the condition was active at any point since the cutoff date
@@ -513,7 +567,14 @@ public abstract class Exporter {
       filterEntries(encounter.conditions, claimItems, cutoffDate, endTime, keepCondition);
 
       // allergies are essentially the same as conditions
-      filterEntries(encounter.allergies, claimItems, cutoffDate, endTime, keepCondition);
+      // But we need to redefine all of the predicates, because we are talking about Allergies as
+      // opposed to Entries... You would think that it would work... but generics are hard
+      Predicate<HealthRecord.Allergy> allergyActive = c -> record.allergyActive(c.type);
+      // or if the condition was active at any point since the cutoff date
+      Predicate<HealthRecord.Allergy> allergyActiveWithinCutoff =
+          c -> c.stop != 0L && c.stop > cutoffDate;
+      Predicate<HealthRecord.Allergy> keepAllergy = allergyActive.or(allergyActiveWithinCutoff);
+      filterEntries(encounter.allergies, claimItems, cutoffDate, endTime, keepAllergy);
 
       // some of the "future death" logic could potentially add a future-dated death certificate
       Predicate<Observation> isCauseOfDeath =
@@ -571,7 +632,7 @@ public abstract class Exporter {
    *                     be kept
    */
   private static <E extends HealthRecord.Entry> void filterEntries(List<E> entries,
-      List<HealthRecord.Entry> claimItems, long cutoffDate,
+      List<Claim.ClaimEntry> claimItems, long cutoffDate,
       long endTime, Predicate<E> keepFunction) {
 
     Iterator<E> iterator = entries.iterator();
@@ -585,7 +646,7 @@ public abstract class Exporter {
           && (keepFunction == null || !keepFunction.test(entry))) {
         iterator.remove();
 
-        claimItems.removeIf(ci -> ci == entry);
+        claimItems.removeIf(ci -> ci.entry == entry);
         // compare with == because we only care if it's the actual same object
       }
     }

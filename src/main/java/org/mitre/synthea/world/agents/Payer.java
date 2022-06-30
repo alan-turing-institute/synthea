@@ -21,13 +21,19 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
+import org.mitre.synthea.export.JSONSkip;
 import org.mitre.synthea.helpers.Config;
 import org.mitre.synthea.helpers.SimpleCSV;
 import org.mitre.synthea.helpers.Utilities;
 import org.mitre.synthea.modules.HealthInsuranceModule;
+import org.mitre.synthea.world.agents.behaviors.IPayerAdjustment;
 import org.mitre.synthea.world.agents.behaviors.IPayerFinder;
+import org.mitre.synthea.world.agents.behaviors.PayerAdjustmentFixed;
+import org.mitre.synthea.world.agents.behaviors.PayerAdjustmentNone;
+import org.mitre.synthea.world.agents.behaviors.PayerAdjustmentRandom;
 import org.mitre.synthea.world.agents.behaviors.PayerFinderBestRates;
 import org.mitre.synthea.world.agents.behaviors.PayerFinderRandom;
+import org.mitre.synthea.world.concepts.Claim.ClaimEntry;
 import org.mitre.synthea.world.concepts.HealthRecord;
 import org.mitre.synthea.world.concepts.HealthRecord.Encounter;
 import org.mitre.synthea.world.concepts.HealthRecord.EncounterType;
@@ -51,9 +57,16 @@ public class Payer implements Serializable {
 
   /* Payer Finder. */
   private static IPayerFinder payerFinder;
-  // Payer selction algorithm choices:
+  // Payer selection algorithm choices:
   private static final String RANDOM = "random";
   private static final String BESTRATE = "best_rate";
+
+  /* Payer Adjustment strategy. */
+  @JSONSkip
+  private IPayerAdjustment payerAdjustment;
+  // Payer adjustment algorithm choices:
+  private static final String NONE = "none";
+  private static final String FIXED = "fixed";
 
   /* Payer Attributes. */
   private final Map<String, Object> attributes;
@@ -78,9 +91,9 @@ public class Payer implements Serializable {
   private final Map<String, AtomicInteger> customerUtilization;
   // row: year, column: type, value: count.
   private transient Table<Integer, String, AtomicInteger> entryUtilization;
-  
+
   /**
-   * Simple bean used to add Java Serialization support to 
+   * Simple bean used to add Java Serialization support to
    * com.google.common.collect.Table&lt;Integer, String, AtomicInteger&gt; which doesn't natively
    * support Serialization.
    */
@@ -88,14 +101,14 @@ public class Payer implements Serializable {
     public Integer year;
     public String type;
     public AtomicInteger count;
-    
+
     public UtilizationBean(Integer year, String type, AtomicInteger count) {
       this.year = year;
       this.type = type;
       this.count = count;
     }
   }
-  
+
   /**
    * Java Serialization support for the entryUtilization field.
    * @param oos stream to write to
@@ -119,7 +132,7 @@ public class Payer implements Serializable {
    */
   private void readObject(ObjectInputStream ois) throws ClassNotFoundException, IOException {
     ois.defaultReadObject();
-    ArrayList<UtilizationBean> entryUtilizationElements = 
+    ArrayList<UtilizationBean> entryUtilizationElements =
             (ArrayList<UtilizationBean>)ois.readObject();
     if (entryUtilizationElements != null) {
       this.entryUtilization = HashBasedTable.create();
@@ -149,7 +162,7 @@ public class Payer implements Serializable {
 
   /**
    * Load into cache the list of payers for a state.
-   * 
+   *
    * @param location the state being loaded.
    */
   public static void loadPayers(Location location) {
@@ -178,7 +191,7 @@ public class Payer implements Serializable {
   /**
    * Read the payers from the given resource file, only importing the ones for the
    * given state.
-   * 
+   *
    * @param location the state being loaded
    * @param fileName Location of the file, relative to src/main/resources
    * @throws IOException if the file cannot be read
@@ -199,6 +212,7 @@ public class Payer implements Serializable {
       if (payerStates.contains(abbreviation) || payerStates.contains("*")) {
 
         Payer parsedPayer = csvLineToPayer(row);
+        parsedPayer.payerAdjustment = buildPayerAdjustment();
 
         // Put the payer in their correct List/Map based on Government/Private.
         if (parsedPayer.ownership.equalsIgnoreCase("government")) {
@@ -214,7 +228,7 @@ public class Payer implements Serializable {
 
   /**
    * Given a line of parsed CSV input, convert the data into a Payer.
-   * 
+   *
    * @param line read a csv line to a payer's attributes
    * @return the new payer.
    */
@@ -238,7 +252,7 @@ public class Payer implements Serializable {
 
   /**
    * Given a comma seperated string, convert the data into a Set.
-   * 
+   *
    * @param field the string to extract the Set from.
    * @return the HashSet of services covered.
    */
@@ -258,6 +272,7 @@ public class Payer implements Serializable {
     noInsurance.defaultCoinsurance = 0.0;
     noInsurance.defaultCopay = 0.0;
     noInsurance.monthlyPremium = 0.0;
+    noInsurance.payerAdjustment = new PayerAdjustmentNone();
     // noInsurance does not cover any services.
     noInsurance.servicesCovered = new HashSet<String>();
     // noInsurance 'covers' all states.
@@ -279,9 +294,30 @@ public class Payer implements Serializable {
         finder = new PayerFinderRandom();
         break;
       default:
-        throw new RuntimeException("Not a valid Payer Selction Algorithm: " + behavior);
+        throw new RuntimeException("Not a valid Payer Selection Algorithm: " + behavior);
     }
     return finder;
+  }
+
+  private static IPayerAdjustment buildPayerAdjustment() {
+    IPayerAdjustment adjustment;
+    String behavior = Config.get("generate.payers.adjustment_behavior", "none").toLowerCase();
+    String rateString = Config.get("generate.payers.adjustment_rate", "0.05");
+    double rate = Double.parseDouble(rateString);
+    switch (behavior) {
+      case NONE:
+        adjustment = new PayerAdjustmentNone();
+        break;
+      case FIXED:
+        adjustment = new PayerAdjustmentFixed(rate);
+        break;
+      case RANDOM:
+        adjustment = new PayerAdjustmentRandom(rate);
+        break;
+      default:
+        adjustment = new PayerAdjustmentNone();
+    }
+    return adjustment;
   }
 
   /**
@@ -310,7 +346,7 @@ public class Payer implements Serializable {
 
   /**
    * Returns the government payer with the given name.
-   * 
+   *
    * @param governmentPayerName the government payer to get.
    * @return returns null if the government payer does not exist.
    */
@@ -331,7 +367,7 @@ public class Payer implements Serializable {
 
   /**
    * Returns a Payer that the person can qualify for.
-   * 
+   *
    * @param person the person who needs to find insurance.
    * @param service the EncounterType the person would like covered.
    * @param time the time that the person requires insurance.
@@ -393,7 +429,7 @@ public class Payer implements Serializable {
   /**
    * Returns whether a payer will accept the given patient at this time. Currently returns
    * true by default, except for Medicare/Medicaid which have hardcoded requirements.
-   * 
+   *
    * @param person Person to consider
    * @param time   Time the person seeks care
    * @return whether or not the payer will accept this patient as a customer
@@ -413,8 +449,8 @@ public class Payer implements Serializable {
       boolean female = (person.attributes.get(Person.GENDER).equals("F"));
       boolean pregnant = (person.attributes.containsKey("pregnant")
           && (boolean) person.attributes.get("pregnant"));
-      boolean blind = (person.attributes.containsKey("blindness")
-          && (boolean) person.attributes.get("blindness"));
+      boolean blind = (person.attributes.containsKey(Person.BLINDNESS)
+          && (boolean) person.attributes.get(Person.BLINDNESS));
       int income = (Integer) person.attributes.get(Person.INCOME);
       boolean medicaidIncomeEligible = (income <= HealthInsuranceModule.medicaidLevel);
 
@@ -427,7 +463,7 @@ public class Payer implements Serializable {
 
   /**
    * Returns whether the payer covers the given service.
-   * 
+   *
    * @param service the entry type to check
    * @return whether the payer covers the given service
    */
@@ -440,7 +476,7 @@ public class Payer implements Serializable {
   /**
    * Is the given Provider in this Payer's network?.
    * Currently just returns true until Networks are implemented.
-   * 
+   *
    * @param provider Provider to consider
    * @return whether or not the provider is in the payer network
    */
@@ -450,7 +486,7 @@ public class Payer implements Serializable {
 
   /**
    * Returns whether or not this payer will cover the given entry.
-   * 
+   *
    * @param entry the entry that needs covering.
    */
   public boolean coversCare(Entry entry) {
@@ -465,7 +501,7 @@ public class Payer implements Serializable {
    * For now, this returns a default copay. But in the future there will be different
    * copays depending on the encounter type covered. If the entry is a wellness visit
    * and the time is after the mandate year, then the copay is $0.00.
-   * 
+   *
    * @param entry the entry to calculate the copay for.
    */
   public double determineCopay(Entry entry) {
@@ -478,8 +514,20 @@ public class Payer implements Serializable {
   }
 
   /**
+   * Determines whether or not this payer will adjust this claim, and by how
+   * much. This determination is based on the claim adjustment strategy configuration,
+   * which defaults to none.
+   * @param claimEntry The claim entry to be adjusted.
+   * @param person The person making the claim.
+   * @return The dollar amount the claim entry was adjusted.
+   */
+  public double adjustClaim(ClaimEntry claimEntry, Person person) {
+    return payerAdjustment.adjustClaim(claimEntry, person);
+  }
+
+  /**
    * Pays the given premium to the Payer, increasing their revenue.
-   * 
+   *
    * @return the monthly premium amount.
    */
   public double payMonthlyPremium() {
@@ -489,7 +537,7 @@ public class Payer implements Serializable {
 
   /**
    * Increments the number of unique users.
-   * 
+   *
    * @param person the person to add to the payer.
    */
   public synchronized void incrementCustomers(Person person) {
@@ -501,7 +549,7 @@ public class Payer implements Serializable {
 
   /**
    * Increments the entries covered by this payer.
-   * 
+   *
    * @param entry the entry covered.
    */
   public void incrementCoveredEntries(Entry entry) {
@@ -511,10 +559,10 @@ public class Payer implements Serializable {
     incrementEntries(Utilities.getYear(entry.start), "covered-" + entryType);
     incrementEntries(Utilities.getYear(entry.start), "covered-" + entryType + "-" + entry.type);
   }
-  
+
   /**
    * Increments the entries not covered by this payer.
-   * 
+   *
    * @param entry the entry covered.
    */
   public void incrementUncoveredEntries(Entry entry) {
@@ -529,7 +577,7 @@ public class Payer implements Serializable {
   // Perhaps move to HealthRecord.java
   /**
    * Determines what entry type (Immunization/Encounter/Procedure/Medication) of the given entry.
-   * 
+   *
    * @param entry the entry to parse.
    */
   private String getEntryType(Entry entry) {
@@ -552,8 +600,8 @@ public class Payer implements Serializable {
   }
 
   /**
-   * Increments encounter utiilization for a given year and encounter type.
-   * 
+   * Increments encounter utilization for a given year and encounter type.
+   *
    * @param year the year of the encounter to add
    * @param key the key (the encounter type and whether it was covered/uncovered)
    */
@@ -566,7 +614,7 @@ public class Payer implements Serializable {
 
   /**
    * Increases the total costs incurred by the payer by the given amount.
-   * 
+   *
    * @param costToPayer the cost of the current encounter, after the patient's copay.
    */
   public void addCoveredCost(double costToPayer) {
@@ -575,7 +623,7 @@ public class Payer implements Serializable {
 
   /**
    * Increases the costs the payer did not cover by the given amount.
-   * 
+   *
    * @param costToPatient the costs that the payer did not cover.
    */
   public void addUncoveredCost(double costToPatient) {
@@ -586,7 +634,7 @@ public class Payer implements Serializable {
    * Adds the Quality of Life Score (QOLS) of a patient of the current (past?)
    * year. Increments the total number of years covered (for averaging out
    * purposes).
-   * 
+   *
    * @param qols the Quality of Life Score to be added.
    */
   public void addQols(double qols) {
@@ -800,6 +848,6 @@ public class Payer implements Serializable {
     }
     return true;
   }
-  
-  
+
+
 }

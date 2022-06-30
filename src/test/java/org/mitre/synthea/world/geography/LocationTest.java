@@ -4,7 +4,6 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 
 import java.awt.geom.Point2D;
-import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -70,11 +69,11 @@ public class LocationTest {
     String demoFileContents =
         Utilities.readResource(Config.get("generate.demographics.default_file"));
     List<LinkedHashMap<String, String>> demographics = SimpleCSV.parse(demoFileContents);
-    
+
     String zipFileContents =
         Utilities.readResource(Config.get("generate.geography.zipcodes.default_file"));
     List<LinkedHashMap<String, String>> zips = SimpleCSV.parse(zipFileContents);
-    
+
     // parse all the locations from the zip codes and put them in a a set.
     Set<String> zipLocations = new HashSet<>();
     for (Map<String,String> line : zips) {
@@ -89,7 +88,7 @@ public class LocationTest {
     for (LinkedHashMap<String,String> line : demographics) {
       String city = line.get("NAME");
       String state = line.get("STNAME");
-      
+
       String key = (city + ", " + state).toUpperCase();
       demoLocations.add(key);
     }
@@ -195,5 +194,14 @@ public class LocationTest {
       Assert.assertNotNull(part);
       Assert.assertTrue(placeOfBirth[placeOfBirth.length - 1].contains(part));
     }
+  }
+
+  @Test
+  public void testSocialDeterminantsOfHealth() {
+    Person person = new Person(0L);
+    int attributeCountBefore = person.attributes.keySet().size();
+    location.setSocialDeterminants(person);
+    int attributeCountAfter = person.attributes.keySet().size();
+    Assert.assertTrue(attributeCountAfter > attributeCountBefore);
   }
 }

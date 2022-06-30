@@ -14,6 +14,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.FileSystemNotFoundException;
 import java.nio.file.Files;
@@ -42,19 +43,20 @@ import org.mitre.synthea.modules.EncounterModule;
 import org.mitre.synthea.modules.LifecycleModule;
 import org.mitre.synthea.modules.QualityOfLifeModule;
 import org.mitre.synthea.modules.WeightLossModule;
+import org.mitre.synthea.modules.covid.C19ImmunizationModule;
 import org.mitre.synthea.world.agents.Person;
 
 /**
  * Module represents the entry point of a generic module.
- * 
- * <p>The `modules` map is the static list of generic modules. It is loaded once per process, 
- * and the list of modules is shared between the generated population. Because we share modules 
- * across the population, it is important that States are cloned before they are executed. 
+ *
+ * <p>The `modules` map is the static list of generic modules. It is loaded once per process,
+ * and the list of modules is shared between the generated population. Because we share modules
+ * across the population, it is important that States are cloned before they are executed.
  * This keeps the "master" copy of the module clean.
  */
 public class Module implements Cloneable, Serializable {
 
-  public static final Double GMF_VERSION = 1.0;
+  public static final Double GMF_VERSION = 2.0;
 
   private static final Configuration JSON_PATH_CONFIG = Configuration.builder()
       .jsonProvider(new GsonJsonProvider())
@@ -62,7 +64,7 @@ public class Module implements Cloneable, Serializable {
       .build();
 
   private static final Map<String, ModuleSupplier> modules = loadModules();
-  
+
   private static Map<String, ModuleSupplier> loadModules() {
     Map<String, ModuleSupplier> retVal = new ConcurrentHashMap<>();
     int submoduleCount = 0;
@@ -72,23 +74,35 @@ public class Module implements Cloneable, Serializable {
     retVal.put("Cardiovascular Disease", new ModuleSupplier(new CardiovascularDiseaseModule()));
     retVal.put("Quality Of Life", new ModuleSupplier(new QualityOfLifeModule()));
     retVal.put("Weight Loss", new ModuleSupplier(new WeightLossModule()));
+    retVal.put("COVID-19 Immunization Module", new ModuleSupplier(new C19ImmunizationModule()));
 
     Properties moduleOverrides = getModuleOverrides();
 
     try {
-      URI modulesURI = Module.class.getClassLoader().getResource("modules").toURI();
-      fixPathFromJar(modulesURI);
-      Path modulesPath = Paths.get(modulesURI);
+      Path modulesPath = getModulesPath();
       submoduleCount = walkModuleTree(modulesPath, retVal, moduleOverrides, false);
     } catch (Exception e) {
       e.printStackTrace();
     }
 
-    System.out.format("Scanned %d modules and %d submodules.\n", 
-                      retVal.size() - submoduleCount, 
+    System.out.format("Scanned %d modules and %d submodules.\n",
+                      retVal.size() - submoduleCount,
                       submoduleCount);
 
     return retVal;
+  }
+
+  /**
+   * The the path to the modules directory, ensuring the right file system support is loaded if
+   * we are running from a jar file.
+   * @return the path
+   * @throws URISyntaxException if something goes wrong
+   * @throws IOException if something goes wrong
+   */
+  public static Path getModulesPath() throws URISyntaxException, IOException {
+    URI modulesURI = Module.class.getClassLoader().getResource("modules").toURI();
+    fixPathFromJar(modulesURI);
+    return Paths.get(modulesURI);
   }
 
   private static Properties getModuleOverrides() {
@@ -108,7 +122,7 @@ public class Module implements Cloneable, Serializable {
 
   private static int walkModuleTree(
           Path modulesPath,
-          Map<String, ModuleSupplier> retVal, 
+          Map<String, ModuleSupplier> retVal,
           Properties overrides,
           boolean localFiles)
           throws Exception {
@@ -146,8 +160,8 @@ public class Module implements Cloneable, Serializable {
       e.printStackTrace();
     }
 
-    System.out.format("Scanned %d local modules and %d local submodules.\n", 
-                      modules.size() - (originalModuleCount + submoduleCount), 
+    System.out.format("Scanned %d local modules and %d local submodules.\n",
+                      modules.size() - (originalModuleCount + submoduleCount),
                       submoduleCount);
   }
 
@@ -168,19 +182,29 @@ public class Module implements Cloneable, Serializable {
     }
   }
 
-  private static String relativePath(Path filePath, Path modulesFolder) {
+  /**
+   * Create a relative path from a folder to a file, removing the file extension and normalizing
+   * path segment separators.
+   * @param filePath path to a file
+   * @param modulesFolder path to the folder
+   * @return relative path to file from the folder
+   */
+  public static String relativePath(Path filePath, Path modulesFolder) {
     String relativeFilePath = modulesFolder.relativize(filePath).toString()
         .replaceFirst(".json", "").replace("\\", "/");
     return relativeFilePath;
   }
 
-  public static Module loadFile(Path path, Path modulesFolder, Properties overrides)
-         throws Exception {
-    boolean submodule = !path.getParent().equals(modulesFolder);
-    return loadFile(path, submodule, overrides, false);
-  }
-
-  private static Module loadFile(Path path, boolean submodule, Properties overrides,
+  /**
+   * Loads the module defined from the file at the given path.
+   *
+   * @param path Path to the module file
+   * @param submodule whether or not this module is a submodule
+   * @param overrides module overrides to apply
+   * @param localFiles true if the file is external to the src/main/resources folder
+   * @return the loaded Module
+   */
+  public static Module loadFile(Path path, boolean submodule, Properties overrides,
           boolean localFiles) throws Exception {
     System.out.format("Loading %s %s\n", submodule ? "submodule" : "module", path.toString());
     String jsonString = localFiles
@@ -224,7 +248,7 @@ public class Module implements Cloneable, Serializable {
 
   /**
    * Get a list of top-level modules including core and submodules.
-   * @return a list of top-level modules, only including core modules and those allowed by the 
+   * @return a list of top-level modules, only including core modules and those allowed by the
    *     supplied predicate. Submodules are loaded, but not included.
    */
   public static List<Module> getModules(Predicate<String> pathPredicate) {
@@ -315,16 +339,32 @@ public class Module implements Cloneable, Serializable {
 
   /**
    * Process this Module with the given Person at the specified time within the simulation.
-   * 
+   * Processing will complete if the person dies.
+   *
    * @param person
    *          : the person being simulated
    * @param time
    *          : the date within the simulated world
    * @return completed : whether or not this Module completed.
    */
-  @SuppressWarnings("unchecked")
   public boolean process(Person person, long time) {
-    if (!person.alive(time)) {
+    return process(person, time, true);
+  }
+
+  /**
+   * Process this Module with the given Person at the specified time within the simulation.
+   *
+   * @param person
+   *          : the person being simulated
+   * @param time
+   *          : the date within the simulated world
+   * @param terminateOnDeath
+   *          : whether or not to terminate if the patient is dead
+   * @return completed : whether or not this Module completed.
+   */
+  @SuppressWarnings("unchecked")
+  public boolean process(Person person, long time, boolean terminateOnDeath) {
+    if (terminateOnDeath && !person.alive(time)) {
       return true;
     }
     person.history = null;
@@ -345,21 +385,23 @@ public class Module implements Cloneable, Serializable {
     // looping until module is finished,
     // probably more than one state
     String nextStateName = null;
-    while (current.run(person, time)) {
-      Long exited = current.exited;      
+    while (current.run(person, time, terminateOnDeath)) {
+      Long exited = current.exited;
       nextStateName = current.transition(person, time);
       // System.out.println(" Transitioning to " + nextStateName);
       current = states.get(nextStateName).clone(); // clone the state so we don't dirty the original
       person.history.add(0, current);
       if (exited != null && exited < time) {
         // stop if the patient died in the meantime...
-        if (!person.alive(exited)) {
+        if (terminateOnDeath && !person.alive(exited)) {
           return true;
         }
         // This must be a delay state that expired between cycles, so temporarily rewind time
-        if (process(person, exited)) {
+        if (process(person, exited, terminateOnDeath)) {
           // if the patient died during the delay, stop
-          return true;
+          if (terminateOnDeath) {
+            return true;
+          }
         }
         current = person.history.get(0);
       }
@@ -383,7 +425,7 @@ public class Module implements Cloneable, Serializable {
 
   /**
    * Get a collection of the names of all the states this Module contains.
-   * 
+   *
    * @return set of all state names, or empty set if this is a non-GMF module
    */
   public Collection<String> getStateNames() {

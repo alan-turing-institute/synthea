@@ -127,6 +127,7 @@ import org.hl7.fhir.r4.model.Timing.UnitsOfTime;
 import org.hl7.fhir.r4.model.Type;
 import org.hl7.fhir.r4.model.codesystems.DoseRateType;
 
+import org.hl7.fhir.r4.model.codesystems.LocationPhysicalType;
 import org.hl7.fhir.utilities.xhtml.NodeType;
 import org.hl7.fhir.utilities.xhtml.XhtmlNode;
 
@@ -240,7 +241,7 @@ public class FhirR4 {
 
     return mappingTable;
   }
-  
+
   public static FhirContext getContext() {
     return FHIR_CTX;
   }
@@ -270,7 +271,7 @@ public class FhirR4 {
         condition(person, personEntry, bundle, encounterEntry, condition);
       }
 
-      for (HealthRecord.Entry allergy : encounter.allergies) {
+      for (HealthRecord.Allergy allergy : encounter.allergies) {
         allergy(person, personEntry, bundle, encounterEntry, allergy);
       }
 
@@ -309,7 +310,7 @@ public class FhirR4 {
       }
 
       for (CarePlan careplan : encounter.careplans) {
-        BundleEntryComponent careTeamEntry = 
+        BundleEntryComponent careTeamEntry =
                 careTeam(person, personEntry, bundle, encounterEntry, careplan);
         carePlan(person, personEntry, bundle, encounterEntry, encounter.provider, careTeamEntry,
                 careplan);
@@ -318,7 +319,7 @@ public class FhirR4 {
       for (ImagingStudy imagingStudy : encounter.imagingStudies) {
         imagingStudy(person, personEntry, bundle, encounterEntry, imagingStudy);
       }
-      
+
       if (USE_US_CORE_IG) {
         String clinicalNoteText = ClinicalNoteExporter.export(person, encounter);
         boolean lastNote =
@@ -441,7 +442,10 @@ public class FhirR4 {
         case "native":
           raceDisplay = "American Indian or Alaska Native";
           break;
-        default: // Other (Put Hawaiian and Pacific Islander here for now)
+        case "hawaiian":
+          raceDisplay = "Native Hawaiian or Other Pacific Islander";
+          break;
+        default:
           raceDisplay = "Other";
           break;
       }
@@ -478,7 +482,7 @@ public class FhirR4 {
         ethnicityDisplay = "Hispanic or Latino";
       } else {
         ethnicity = "nonhispanic";
-        ethnicityDisplay = "Non Hispanic or Latino";
+        ethnicityDisplay = "Not Hispanic or Latino";
       }
 
       String ethnicityNum = (String) raceEthnicityCodes.get(ethnicity);
@@ -666,7 +670,7 @@ public class FhirR4 {
 
     return newEntry(bundle, patientResource, (String) person.attributes.get(Person.ID));
   }
-  
+
   /**
    * Map the given Encounter into a FHIR Encounter resource, and add it to the given Bundle.
    *
@@ -728,7 +732,7 @@ public class FhirR4 {
       // no associated provider, patient goes to wellness provider
       provider = person.getProvider(EncounterType.WELLNESS, encounter.start);
     }
-    
+
     if (TRANSACTION_BUNDLE) {
       encounterResource.setServiceProvider(new Reference(
               ExportHelper.buildFhirSearchUrl("Organization", provider.getResourceID())));
@@ -743,12 +747,30 @@ public class FhirR4 {
     }
     encounterResource.getServiceProvider().setDisplay(provider.name);
     if (USE_US_CORE_IG) {
-      String referenceUrl = TRANSACTION_BUNDLE
-              ? ExportHelper.buildFhirSearchUrl("Location", provider.getResourceLocationID())
-              : findLocationUrl(provider, bundle);
+      String referenceUrl;
+      String display;
+      if (TRANSACTION_BUNDLE) {
+        if (encounter.type.equals(EncounterType.VIRTUAL.toString())) {
+          referenceUrl = ExportHelper.buildFhirSearchUrl("Location",
+              FhirR4PatientHome.getPatientHome().getId());
+          display = "Patient's Home";
+        } else {
+          referenceUrl = ExportHelper.buildFhirSearchUrl("Location",
+              provider.getResourceLocationID());
+          display = provider.name;
+        }
+      } else {
+        if (encounter.type.equals(EncounterType.VIRTUAL.toString())) {
+          referenceUrl = addPatientHomeLocation(bundle);
+          display = "Patient's Home";
+        } else {
+          referenceUrl = findLocationUrl(provider, bundle);
+          display = provider.name;
+        }
+      }
       encounterResource.addLocation().setLocation(new Reference()
           .setReference(referenceUrl)
-          .setDisplay(provider.name));
+          .setDisplay(display));
     }
 
     if (encounter.clinician != null) {
@@ -815,6 +837,29 @@ public class FhirR4 {
   }
 
   /**
+   * Finds the "patient's home" Location resource and returns the URL. If it does not yet exist in
+   * the bundle, it will create it.
+   * @param bundle the bundle to look in for the patient home resource
+   * @return the URL of the patient home resource
+   */
+  public static String addPatientHomeLocation(Bundle bundle) {
+    String locationURL = null;
+    for (BundleEntryComponent entry : bundle.getEntry()) {
+      if (entry.getResource().fhirType().equals("Location")) {
+        if (entry.getResource().getId().equals(FhirR4PatientHome.getPatientHome().getId())) {
+          locationURL = entry.getFullUrl();
+        }
+      }
+    }
+    if (locationURL == null) {
+      org.hl7.fhir.r4.model.Location location = FhirR4PatientHome.getPatientHome();
+      BundleEntryComponent bec = newEntry(bundle, location, location.getId());
+      locationURL = bec.getFullUrl();
+    }
+    return locationURL;
+  }
+
+  /**
    * Find the Location entry in this bundle for the given provider, and return the
    * "fullUrl" attribute.
    *
@@ -827,8 +872,9 @@ public class FhirR4 {
       if (entry.getResource().fhirType().equals("Location")) {
         org.hl7.fhir.r4.model.Location location =
             (org.hl7.fhir.r4.model.Location) entry.getResource();
-        if (location.getManagingOrganization()
-            .getIdentifier().getValue().equals(provider.getResourceID())) {
+        Reference managingOrg = location.getManagingOrganization();
+        if (managingOrg != null
+            && managingOrg.getIdentifier().getValue().equals(provider.getResourceID())) {
           return entry.getFullUrl();
         }
       }
@@ -847,8 +893,7 @@ public class FhirR4 {
     for (BundleEntryComponent entry : bundle.getEntry()) {
       if (entry.getResource().fhirType().equals("Practitioner")) {
         Practitioner doc = (Practitioner) entry.getResource();
-        if (doc.getIdentifierFirstRep().getValue()
-              .equals("" + (9_999_999_999L - clinician.identifier))) {
+        if (doc.getIdentifierFirstRep().getValue().equals(clinician.npi)) {
           return entry.getFullUrl();
         }
       }
@@ -871,7 +916,7 @@ public class FhirR4 {
       Person person, BundleEntryComponent personEntry,
       Bundle bundle, BundleEntryComponent encounterEntry, Claim claim,
       BundleEntryComponent medicationEntry) {
-    
+
     org.hl7.fhir.r4.model.Claim claimResource = new org.hl7.fhir.r4.model.Claim();
     org.hl7.fhir.r4.model.Encounter encounterResource =
         (org.hl7.fhir.r4.model.Encounter) encounterEntry.getResource();
@@ -980,7 +1025,8 @@ public class FhirR4 {
     int procedureSequence = 1;
     int informationSequence = 1;
 
-    for (HealthRecord.Entry item : claim.items) {
+    for (Claim.ClaimEntry claimEntry : claim.items) {
+      HealthRecord.Entry item = claimEntry.entry;
       if (Costs.hasCost(item)) {
         // update claimItems list
         Code primaryCode = item.codes.get(0);
@@ -1027,7 +1073,7 @@ public class FhirR4 {
         claimResource.addDiagnosis(diagnosisComponent);
 
         // update claimItems with diagnosis
-        ItemComponent diagnosisItem = 
+        ItemComponent diagnosisItem =
             new ItemComponent(new PositiveIntType(itemSequence),
                 mapCodeToCodeableConcept(item.codes.get(0), SNOMED_URI));
         diagnosisItem.addDiagnosisSequence(conditionSequence);
@@ -1115,39 +1161,32 @@ public class FhirR4 {
         .setCode("primary")
         .setSystem("http://terminology.hl7.org/CodeSystem/claimcareteamrole")
         .setDisplay("Primary Care Practitioner"));
+    Reference providerReference = new Reference().setDisplay("Unknown");
     if (encounter.clinician != null) {
-      // This is what should happen if BlueButton 2.0 wasn't needlessly restrictive
       String practitionerFullUrl = TRANSACTION_BUNDLE
-              ? ExportHelper.buildFhirNpiSearchUrl(encounter.clinician)
-              : findPractitioner(encounter.clinician, bundle);
-      eob.setProvider(new Reference(practitionerFullUrl));
-      eob.addCareTeam(new ExplanationOfBenefit.CareTeamComponent()
-          .setSequence(1)
-          .setProvider(new Reference(practitionerFullUrl))
-          .setRole(primaryCareRole));
-      referral.setRequester(new Reference(practitionerFullUrl));
-      referral.addPerformer(new Reference(practitionerFullUrl));
+          ? ExportHelper.buildFhirNpiSearchUrl(encounter.clinician)
+          : findPractitioner(encounter.clinician, bundle);
+      if (practitionerFullUrl != null) {
+        providerReference = new Reference(practitionerFullUrl);
+      }
     } else if (encounter.provider != null) {
       String providerUrl = TRANSACTION_BUNDLE
-              ? ExportHelper.buildFhirSearchUrl("Location",
-                      encounter.provider.getResourceLocationID())
-              : findProviderUrl(encounter.provider, bundle);
-      eob.setProvider(new Reference(providerUrl));
-      eob.addCareTeam(new ExplanationOfBenefit.CareTeamComponent()
-          .setSequence(1)
-          .setProvider(new Reference(providerUrl))
-          .setRole(primaryCareRole));
-      referral.setRequester(new Reference(providerUrl));
-      referral.addPerformer(new Reference(providerUrl));
-    } else {
-      eob.setProvider(new Reference().setDisplay("Unknown"));
-      eob.addCareTeam(new ExplanationOfBenefit.CareTeamComponent()
-          .setSequence(1)
-          .setProvider(new Reference().setDisplay("Unknown"))
-          .setRole(primaryCareRole));
-      referral.setRequester(new Reference().setDisplay("Unknown"));
-      referral.addPerformer(new Reference().setDisplay("Unknown"));
+          ? ExportHelper.buildFhirSearchUrl("Location",
+                    encounter.provider.getResourceLocationID())
+          : findProviderUrl(encounter.provider, bundle);
+      if (providerUrl != null) {
+        providerReference = new Reference(providerUrl);
+      }
     }
+
+    eob.setProvider(providerReference);
+    eob.addCareTeam(new ExplanationOfBenefit.CareTeamComponent()
+        .setSequence(1)
+        .setProvider(providerReference)
+        .setRole(primaryCareRole));
+    referral.setRequester(providerReference);
+    referral.addPerformer(providerReference);
+
     eob.addContained(referral);
     eob.setReferral(new Reference().setReference("#referral"));
 
@@ -1377,7 +1416,7 @@ public class FhirR4 {
    * @param condition      The Condition
    * @return The added Entry
    */
-  private static BundleEntryComponent condition(RandomNumberGenerator rand, 
+  private static BundleEntryComponent condition(RandomNumberGenerator rand,
           BundleEntryComponent personEntry, Bundle bundle, BundleEntryComponent encounterEntry,
           HealthRecord.Entry condition) {
     Condition conditionResource = new Condition();
@@ -1442,7 +1481,7 @@ public class FhirR4 {
    */
   private static BundleEntryComponent allergy(RandomNumberGenerator rand,
           BundleEntryComponent personEntry, Bundle bundle, BundleEntryComponent encounterEntry,
-          HealthRecord.Entry allergy) {
+          HealthRecord.Allergy allergy) {
 
     AllergyIntolerance allergyResource = new AllergyIntolerance();
     allergyResource.setRecordedDate(new Date(allergy.start));
@@ -1458,9 +1497,33 @@ public class FhirR4 {
       status.getCodingFirstRep().setCode("inactive");
     }
 
-    allergyResource.setType(AllergyIntoleranceType.ALLERGY);
-    AllergyIntoleranceCategory category = AllergyIntoleranceCategory.FOOD;
-    allergyResource.addCategory(category); // TODO: allergy categories in GMF
+    if (allergy.allergyType == null
+        || allergy.allergyType.equalsIgnoreCase("allergy")) {
+      allergyResource.setType(AllergyIntoleranceType.ALLERGY);
+    } else {
+      allergyResource.setType(AllergyIntoleranceType.INTOLERANCE);
+    }
+    AllergyIntoleranceCategory category = null;
+    if (allergy.category != null) {
+      switch (allergy.category) {
+        case "food":
+          category = AllergyIntoleranceCategory.FOOD;
+          break;
+        case "medication":
+          category = AllergyIntoleranceCategory.MEDICATION;
+          break;
+        case "environment":
+          category = AllergyIntoleranceCategory.ENVIRONMENT;
+          break;
+        case "biologic":
+          category = AllergyIntoleranceCategory.BIOLOGIC;
+          break;
+        default:
+          category = AllergyIntoleranceCategory.MEDICATION;
+      }
+    }
+    allergyResource.addCategory(category);
+
     allergyResource.setCriticality(AllergyIntoleranceCriticality.LOW);
 
     CodeableConcept verification = new CodeableConcept();
@@ -1472,6 +1535,29 @@ public class FhirR4 {
     allergyResource.setPatient(new Reference(personEntry.getFullUrl()));
     Code code = allergy.codes.get(0);
     allergyResource.setCode(mapCodeToCodeableConcept(code, SNOMED_URI));
+
+    if (allergy.reactions != null) {
+      allergy.reactions.keySet().stream().forEach(manifestation -> {
+        AllergyIntolerance.AllergyIntoleranceReactionComponent reactionComponent =
+            new AllergyIntolerance.AllergyIntoleranceReactionComponent();
+        reactionComponent.addManifestation(mapCodeToCodeableConcept(manifestation, SNOMED_URI));
+        HealthRecord.ReactionSeverity severity = allergy.reactions.get(manifestation);
+        switch (severity) {
+          case MILD:
+            reactionComponent.setSeverity(AllergyIntolerance.AllergyIntoleranceSeverity.MILD);
+            break;
+          case MODERATE:
+            reactionComponent.setSeverity(AllergyIntolerance.AllergyIntoleranceSeverity.MODERATE);
+            break;
+          case SEVERE:
+            reactionComponent.setSeverity(AllergyIntolerance.AllergyIntoleranceSeverity.SEVERE);
+            break;
+          default:
+            // do nothing
+        }
+        allergyResource.addReaction(reactionComponent);
+      });
+    }
 
     if (USE_US_CORE_IG) {
       Meta meta = new Meta();
@@ -1598,27 +1684,27 @@ public class FhirR4 {
           + value.getClass().toString() + "; " + value);
     }
   }
-  
+
   /**
    * Maps a Synthea internal SampledData object to the FHIR standard SampledData
    * representation.
-   * 
+   *
    * @param value Synthea internal SampledData instance
    * @param unit Observation unit value
    * @return
    */
   static org.hl7.fhir.r4.model.SampledData mapValueToSampledData(
       Components.SampledData value, String unit) {
-    
+
     org.hl7.fhir.r4.model.SampledData recordData = new org.hl7.fhir.r4.model.SampledData();
     recordData.setOrigin(new Quantity().setValue(value.originValue)
         .setCode(unit).setSystem(UNITSOFMEASURE_URI)
         .setUnit(unit));
-    
+
     // Use the period from the first series. They should all be the same.
     // FHIR output is milliseconds so we need to convert from TimeSeriesData seconds.
     recordData.setPeriod(value.series.get(0).getPeriod() * 1000);
-    
+
     // Set optional fields if they were provided
     if (value.factor != null) {
       recordData.setFactor(value.factor);
@@ -1629,11 +1715,11 @@ public class FhirR4 {
     if (value.upperLimit != null) {
       recordData.setUpperLimit(value.upperLimit);
     }
-    
+
     recordData.setDimensions(value.series.size());
-    
+
     recordData.setData(ExportHelper.sampledDataToValueString(value));
-    
+
     return recordData;
   }
 
@@ -1752,7 +1838,7 @@ public class FhirR4 {
     deviceResource.setPatient(new Reference(personEntry.getFullUrl()));
     return newEntry(rand, bundle, deviceResource);
   }
-  
+
   /**
    * Map the JsonObject for a Supply into a FHIR SupplyDelivery and add it to the Bundle.
    *
@@ -1766,26 +1852,26 @@ public class FhirR4 {
   private static BundleEntryComponent supplyDelivery(RandomNumberGenerator rand,
           BundleEntryComponent personEntry, Bundle bundle, HealthRecord.Supply supply,
           Encounter encounter) {
-   
+
     SupplyDelivery supplyResource = new SupplyDelivery();
     supplyResource.setStatus(SupplyDeliveryStatus.COMPLETED);
     supplyResource.setPatient(new Reference(personEntry.getFullUrl()));
-    
+
     CodeableConcept type = new CodeableConcept();
     type.addCoding()
       .setCode("device")
       .setDisplay("Device")
       .setSystem("http://terminology.hl7.org/CodeSystem/supply-item-type");
     supplyResource.setType(type);
-    
+
     SupplyDeliverySuppliedItemComponent suppliedItem = new SupplyDeliverySuppliedItemComponent();
     suppliedItem.setItem(mapCodeToCodeableConcept(supply.codes.get(0), SNOMED_URI));
     suppliedItem.setQuantity(new Quantity(supply.quantity));
-    
+
     supplyResource.setSuppliedItem(suppliedItem);
-    
+
     supplyResource.setOccurrence(convertFhirDateTime(supply.start, true));
-    
+
     return newEntry(rand, bundle, supplyResource);
   }
 
@@ -1919,7 +2005,7 @@ public class FhirR4 {
       medicationResource.addExtension()
         .setUrl(SHR_EXT + "shr-base-ActionCode-extension")
         .setValue(PRESCRIPTION_OF_DRUG_CC);
-    
+
       medicationResource.setMeta(new Meta()
           .addProfile(SHR_EXT + "shr-medication-MedicationRequested"));
 
@@ -2062,7 +2148,7 @@ public class FhirR4 {
 
   /**
    * Add a MedicationAdministration if needed for the given medication.
-   * 
+   *
    * @param rand              Source of randomness to use when generating ids etc
    * @param personEntry       The Entry for the Person
    * @param bundle            Bundle to add the MedicationAdministration to
@@ -2639,7 +2725,7 @@ public class FhirR4 {
     imagingStudyResource.setNumberOfInstances(totalNumberOfInstances);
     return newEntry(rand, bundle, imagingStudyResource);
   }
-  
+
   /**
    * Map the given Observation with attachment element to a FHIR Media resource, and add it to the
    * given Bundle.
@@ -2672,7 +2758,7 @@ public class FhirR4 {
 
     Attachment content = (Attachment) obs.value;
     org.hl7.fhir.r4.model.Attachment contentResource = new org.hl7.fhir.r4.model.Attachment();
-    
+
     contentResource.setContentType(content.contentType);
     contentResource.setLanguage(content.language);
     if (content.data != null) {
@@ -2685,7 +2771,7 @@ public class FhirR4 {
     if (content.hash != null) {
       contentResource.setHashElement(new org.hl7.fhir.r4.model.Base64BinaryType(content.hash));
     }
-    
+
     mediaResource.setWidth(content.width);
     mediaResource.setHeight(content.height);
 
@@ -2760,7 +2846,7 @@ public class FhirR4 {
     if (USE_US_CORE_IG) {
       location = providerLocation(rand, bundle, provider);
     }
-    
+
     BundleEntryComponent entry = newEntry(bundle, organizationResource, provider.getResourceID());
     // add location to bundle *after* organization to ensure no forward reference
     if (location != null) {
@@ -2769,7 +2855,7 @@ public class FhirR4 {
 
     return entry;
   }
-  
+
   /**
    * Map the Provider into a FHIR Location resource, and add it to the given Bundle.
    *
@@ -2843,10 +2929,9 @@ public class FhirR4 {
           "http://hl7.org/fhir/us/core/StructureDefinition/us-core-practitioner");
       practitionerResource.setMeta(meta);
     }
-    String practitionerNPI = Long.toString(9_999_999_999L - clinician.identifier);
     practitionerResource.addIdentifier()
             .setSystem("http://hl7.org/fhir/sid/us-npi")
-            .setValue(practitionerNPI);
+            .setValue(clinician.npi);
     practitionerResource.setActive(true);
     practitionerResource.addName().setFamily(
         (String) clinician.attributes.get(Clinician.LAST_NAME))
@@ -2892,7 +2977,7 @@ public class FhirR4 {
       practitionerRole.setPractitioner(new Reference()
           .setIdentifier(new Identifier()
                   .setSystem("http://hl7.org/fhir/sid/us-npi")
-                  .setValue(practitionerNPI))
+                  .setValue(clinician.npi))
           .setDisplay(practitionerResource.getNameFirstRep().getNameAsSingleString()));
       practitionerRole.setOrganization(new Reference()
           .setIdentifier(new Identifier()
@@ -3017,7 +3102,7 @@ public class FhirR4 {
     String resourceID = rand.randUUID().toString();
     return newEntry(bundle, resource, resourceID);
   }
-  
+
   /**
    * Helper function to create an Entry for the given Resource within the given Bundle. Sets the
    * resourceID to a random UUID, sets the entry's fullURL to that resourceID, and adds the entry to

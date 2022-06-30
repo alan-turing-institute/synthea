@@ -27,14 +27,14 @@ public class HealthRecordTest {
   @Test
   public void testReportAllObs() {
     Person person = new Person(0L);
-    person.setPayerAtTime(time, noInsurance);
+    person.coverage.setPayerAtTime(time, noInsurance);
     HealthRecord record = new HealthRecord(person);
     Encounter encounter = record.encounterStart(time, EncounterType.WELLNESS);
     record.observation(time, "A", "A");
     record.observation(time, "B", "B");
     record.observation(time, "C", "C");
     Report report = record.report(time, "R", 3);
-    
+
     Assert.assertEquals(3, encounter.observations.size());
     Assert.assertEquals(3, report.observations.size());
     Assert.assertEquals("A", report.observations.get(0).value);
@@ -45,14 +45,14 @@ public class HealthRecordTest {
   @Test
   public void testReportSomeObs() {
     Person person = new Person(0L);
-    person.setPayerAtTime(time, noInsurance);
+    person.coverage.setPayerAtTime(time, noInsurance);
     HealthRecord record = new HealthRecord(person);
     Encounter encounter = record.encounterStart(time, EncounterType.WELLNESS);
     record.observation(time, "A", "A");
     record.observation(time, "B", "B");
     record.observation(time, "C", "C");
     Report report = record.report(time, "R", 2);
-    
+
     Assert.assertEquals(3, encounter.observations.size());
     Assert.assertEquals(2, report.observations.size());
     Assert.assertEquals("B", report.observations.get(0).value);
@@ -62,18 +62,18 @@ public class HealthRecordTest {
   @Test
   public void testReportTooManyObs() {
     Person person = new Person(0L);
-    person.setPayerAtTime(time, noInsurance);
+    person.coverage.setPayerAtTime(time, noInsurance);
     HealthRecord record = new HealthRecord(person);
     Encounter encounter = record.encounterStart(time, EncounterType.WELLNESS);
     record.observation(time, "A", "A");
     record.observation(time, "B", "B");
     record.observation(time, "C", "C");
     Report report = record.report(time, "R", 4);
-    
+
     Assert.assertEquals(3, encounter.observations.size());
     Assert.assertEquals(3, report.observations.size());
     Assert.assertEquals("A", report.observations.get(0).value);
     Assert.assertEquals("B", report.observations.get(1).value);
     Assert.assertEquals("C", report.observations.get(2).value);
-  } 
+  }
 }

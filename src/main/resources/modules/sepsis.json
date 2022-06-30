@@ -3,7 +3,7 @@
   "remarks": [
     "Module Title: Sepsis",
     "Version Number: 1.0",
-    "Last Updated: 12/15/2020",
+    "Date Created: 12/15/2020",
     "Module Steward: ONC",
     "Module Developer: Clinovations Government + Health",
     "Description: Sepsis is a leading cause of death in critically ill patients in the United States. This module models the treatment of sepsis in patients >=18 years of age. It is based on the Surviving Sepsis Campaign clinical care guidelines for sepsis, particularly the guidelines for the Hour-1 Bundle for initial resuscitation of sepsis and septic shock. ",
@@ -40,7 +40,24 @@
     },
     "Administer_Broad_Spectrum_Abx": {
       "type": "Simple",
-      "direct_transition": "Piperacillin_Tazobactam"
+      "conditional_transition": [
+        {
+          "transition": "Aztreonam",
+          "condition": {
+            "condition_type": "Active Allergy",
+            "codes": [
+              {
+                "system": "RxNorm",
+                "code": "7984",
+                "display": "Penicillin V"
+              }
+            ]
+          }
+        },
+        {
+          "transition": "Piperacillin_Tazobactam"
+        }
+      ]
     },
     "Age_Guard": {
       "type": "Guard",
@@ -139,7 +156,7 @@
           }
         },
         {
-          "transition": "Set_Systolic"
+          "transition": "Record_Blood_Pressure"
         }
       ],
       "range": {
@@ -227,7 +244,7 @@
           "distribution": 0.125
         },
         {
-          "transition": "Admit_to_Inpatient",
+          "transition": "Record_Blood_Pressure_2",
           "distribution": 0.875
         }
       ]
@@ -245,7 +262,6 @@
     },
     "Septic_Shock": {
       "type": "ConditionOnset",
-      "assign_to_attribute": "",
       "codes": [
         {
           "system": "SNOMED-CT",
@@ -360,7 +376,7 @@
           "display": "4 ML norepinephrine 1 MG/ML Injection"
         }
       ],
-      "direct_transition": "Set_Systolic",
+      "direct_transition": "Record_Blood_Pressure",
       "administration": true,
       "remarks": [
         "Among them, NE remains the most commonly used vasopressor and is recommended as the first-line agent by the Surviving Sepsis Campaign (SSC) experts (2). As a strong α-adrenergic agonist, NE increases blood pressure primarily through its vasoconstrictive properties with little effect on heart rate. Ref: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7333107/#:~:text=Among%20them%2C%20NE%20remains%20the,little%20effect%20on%20heart%20rate.",
@@ -435,7 +451,7 @@
     "Low_MAP": {
       "type": "Observation",
       "category": "vital-signs",
-      "unit": "",
+      "unit": "mm[Hg]",
       "codes": [
         {
           "system": "LOINC",
@@ -452,7 +468,7 @@
     "Normal_MAP": {
       "type": "Observation",
       "category": "vital-signs",
-      "unit": "",
+      "unit": "mm[Hg]",
       "codes": [
         {
           "system": "LOINC",
@@ -464,26 +480,6 @@
       "range": {
         "low": 70,
         "high": 100
-      }
-    },
-    "Set_Diastolic": {
-      "type": "VitalSign",
-      "vital_sign": "Diastolic Blood Pressure",
-      "unit": "mm[Hg]",
-      "direct_transition": "Record_Blood_Pressure",
-      "range": {
-        "low": 40,
-        "high": 120
-      }
-    },
-    "Set_Systolic": {
-      "type": "VitalSign",
-      "vital_sign": "Systolic Blood Pressure",
-      "unit": "mm[Hg]",
-      "direct_transition": "Set_Diastolic",
-      "range": {
-        "low": 40,
-        "high": 120
       }
     },
     "Record_Blood_Pressure": {
@@ -508,7 +504,10 @@
               "display": "Systolic Blood Pressure"
             }
           ],
-          "vital_sign": "Systolic Blood Pressure"
+          "range": {
+            "low": 40,
+            "high": 120
+          }
         },
         {
           "category": "laboratory",
@@ -520,7 +519,10 @@
               "display": "Diastolic Blood Pressure"
             }
           ],
-          "vital_sign": "Diastolic Blood Pressure"
+          "range": {
+            "low": 40,
+            "high": 120
+          }
         }
       ],
       "direct_transition": "Check_ARDS"
@@ -580,6 +582,59 @@
         "high": 40,
         "unit": "years"
       }
+    },
+    "Record_Blood_Pressure_2": {
+      "type": "MultiObservation",
+      "category": "vital-signs",
+      "number_of_observations": 0,
+      "codes": [
+        {
+          "system": "LOINC",
+          "code": "85354-9",
+          "display": "Blood Pressure"
+        }
+      ],
+      "observations": [
+        {
+          "category": "vital-signs",
+          "unit": "mm[Hg]",
+          "codes": [
+            {
+              "system": "LOINC",
+              "code": "8480-6",
+              "display": "Systolic Blood Pressure"
+            }
+          ],
+          "vital_sign": "Systolic Blood Pressure"
+        },
+        {
+          "category": "laboratory",
+          "unit": "mm[Hg]",
+          "codes": [
+            {
+              "system": "LOINC",
+              "code": "8462-4",
+              "display": "Diastolic Blood Pressure"
+            }
+          ],
+          "vital_sign": "Diastolic Blood Pressure"
+        }
+      ],
+      "direct_transition": "Admit_to_Inpatient"
+    },
+    "Aztreonam": {
+      "type": "MedicationOrder",
+      "codes": [
+        {
+          "system": "RxNorm",
+          "code": 1664986,
+          "display": "Aztreonam 2000 MG Injection"
+        }
+      ],
+      "direct_transition": "Vancomycin",
+      "administration": true,
+      "reason": "Sepsis"
     }
-  }
+  },
+  "gmf_version": 2
 }

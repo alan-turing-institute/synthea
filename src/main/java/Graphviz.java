@@ -16,19 +16,17 @@ import guru.nidi.graphviz.model.Link;
 import guru.nidi.graphviz.model.Node;
 
 import java.io.File;
-import java.io.FileReader;
 import java.io.IOException;
+import java.io.StringReader;
 import java.net.URISyntaxException;
-import java.net.URL;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
 
+import org.mitre.synthea.engine.Module;
 import org.mitre.synthea.export.Exporter;
 import org.mitre.synthea.helpers.Utilities;
 
@@ -42,7 +40,7 @@ public class Graphviz {
    *     the default modules will be loaded using the ClassLoader.
    * @throws URISyntaxException on failure to load modules.
    */
-  public static void main(String[] args) throws URISyntaxException {
+  public static void main(String[] args) throws URISyntaxException, IOException {
     File folder = Exporter.getOutputFolder("graphviz", null);
 
     Path inputPath = null;
@@ -50,8 +48,7 @@ public class Graphviz {
       File file = new File(args[0]);
       inputPath = file.toPath();
     } else {
-      URL modulesFolder = ClassLoader.getSystemClassLoader().getResource("modules");
-      inputPath = Paths.get(modulesFolder.toURI());
+      inputPath = Module.getModulesPath();
     }
 
     System.out.println("Rendering graphs to `" + folder.getAbsolutePath() + "`...");
@@ -68,7 +65,7 @@ public class Graphviz {
       Utilities.walkAllModules(inputPath, t -> {
         try {
           JsonObject module = loadFile(t, inputPath);
-          String relativePath = relativePath(t, inputPath);
+          String relativePath = Module.relativePath(t, inputPath);
           generateJsonModuleGraph(module, outputFolder, relativePath);
         } catch (IOException e) {
           e.printStackTrace();
@@ -81,18 +78,12 @@ public class Graphviz {
 
   private static JsonObject loadFile(Path path, Path modulesFolder) throws IOException {
     System.out.format("Loading %s\n", path.toString());
-    FileReader fileReader = new FileReader(path.toString());
-    JsonReader reader = new JsonReader(fileReader);
+    String moduleRelativePath = modulesFolder.getParent().relativize(path).toString();
+    JsonReader reader = new JsonReader(new StringReader(
+             Utilities.readResource(moduleRelativePath)));
     JsonObject object = JsonParser.parseReader(reader).getAsJsonObject();
-    fileReader.close();
     reader.close();
     return object;
-  }
-
-  private static String relativePath(Path filePath, Path modulesFolder) {
-    String folderString = Matcher.quoteReplacement(modulesFolder.toString() + File.separator);
-    return filePath.toString().replaceFirst(folderString, "").replaceFirst(".json", "")
-        .replace("\\", "/");
   }
 
   private static void generateJsonModuleGraph(JsonObject module, File outputFolder,
@@ -260,6 +251,21 @@ public class Graphviz {
           Link link = Factory.to(target).with(Label.of(label));
           links.add(link);
         });
+      } else if (state.has("lookup_table_transition")) {
+        JsonArray distributions = state.get("lookup_table_transition").getAsJsonArray();
+        distributions.forEach(d -> {
+          JsonObject option = d.getAsJsonObject();
+          String destination = option.get("transition").getAsString();
+          double pct = option.get("default_probability").getAsDouble() * 100.0;
+          String label = "See Table (def: " + pct + "%)";
+          Node target = nodeMap.get(destination);
+          if (target == null) {
+            throw new RuntimeException(
+                relativePath + " " + name + " transitioning to unknown state: " + destination);
+          }
+          Link link = Factory.to(target).with(Label.of(label));
+          links.add(link);
+        });
       }
       g = g.with(node.link(links.toArray(new Link[0])));
     }
@@ -407,7 +413,7 @@ public class Graphviz {
       case "Device":
         JsonObject c = state.get("code").getAsJsonObject();
         details.append(toCodeString(c, true));
-        
+
         if (state.has("manufacturer")) {
           details.append("Manufacturer: ")
             .append(state.get("manufacturer").getAsString())
@@ -543,7 +549,7 @@ public class Graphviz {
    * Helper function to turn a a Json "code" type object into a consistent string.
    * Format: "SYSTEM[CODE]: DISPLAY"
    * Example: "SNOMED-CT[44054006]: Diabetes"
-   * 
+   *
    * @param coding JSON coding object
    * @param includeNewLine whether or not to include a newline at the end
    * @return String to display the code
@@ -565,7 +571,7 @@ public class Graphviz {
 
     return sb.toString();
   }
-  
+
   private static String logicDetails(JsonObject logic) {
     String conditionType = logic.get("condition_type").getAsString();
 
@@ -655,7 +661,7 @@ public class Graphviz {
             + valueString + NEWLINE;
       case "Vital Sign":
         return "Vital Sign " + logic.get("vital_sign").getAsString() + " \\"
-            + logic.get("operator").getAsString() + " " + logic.get("value").getAsString() + "}"
+            + logic.get("operator").getAsString() + " " + logic.get("value").getAsString()
             + NEWLINE;
       case "Active Condition":
         String cond = findReferencedType(logic);
