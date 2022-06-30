@@ -1,0 +1,49 @@
+{
+  "name": "HayFever",
+  "remarks": [
+    "A blank module"
+  ],
+  "states": {
+    "Initial": {
+      "type": "Initial",
+      "direct_transition": "New_State",
+      "name": "Initial"
+    },
+    "Terminal": {
+      "type": "Terminal",
+      "name": "Terminal"
+    },
+    "New_State": {
+      "type": "ConditionOnset",
+      "target_encounter": "",
+      "codes": [
+        {
+          "system": "SNOMED-CT",
+          "code": 21719001,
+          "display": "SNOMED code",
+          "value_set": ""
+        }
+      ],
+      "direct_transition": "Record_BMI",
+      "name": "New_State"
+    },
+    "Record_BMI": {
+      "type": "Observation",
+      "category": "laboratory",
+      "codes": [
+        {
+          "system": "LOINC",
+          "code": "305351004",
+          "display": "Admission to intensive care unit"
+        }
+      ],
+      "exact": {
+        "quantity": 1
+      },
+      "unit": "kg/m2",
+      "direct_transition": "Terminal",
+      "name": "some state"
+    }
+  },
+  "gmf_version": 1
+}
