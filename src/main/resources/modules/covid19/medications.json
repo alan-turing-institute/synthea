@@ -166,11 +166,11 @@
       "distributed_transition": [
         {
           "transition": "Severity Breakdown",
-          "distribution": 0.1
+          "distribution": 0.9
         },
         {
           "transition": "No Clinical Trial",
-          "distribution": 0.9
+          "distribution": 0.1
         }
       ]
     },
