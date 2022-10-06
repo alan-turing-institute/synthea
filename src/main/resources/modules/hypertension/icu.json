@@ -1,0 +1,819 @@
+{
+  "name": "admission",
+  "remarks": [
+    "Hospitalization and ICU admission for survivors and non-survivors. Timelines from Table 1 and Table 2, and outcomes and complications according to Table 2, from https://doi.org/10.1016/S0140-6736(20)30566-3"
+  ],
+  "states": {
+    "Initial": {
+      "type": "Initial",
+      "direct_transition": "ICU Admission",
+      "name": "Initial"
+    },
+    "Terminal": {
+      "type": "Terminal",
+      "name": "Terminal"
+    },
+    "ICU Admission": {
+      "type": "Encounter",
+      "encounter_class": "inpatient",
+      "codes": [
+        {
+          "system": "SNOMED-CT",
+          "code": "305351004",
+          "display": "Admission to intensive care unit (procedure)",
+          "value_set": ""
+        }
+      ],
+      "conditional_transition": [
+        {
+          "transition": "Non Survivor ICU Stay",
+          "condition": {
+            "condition_type": "Attribute",
+            "attribute": "htn_death",
+            "operator": "==",
+            "value": true
+          }
+        },
+        {
+          "transition": "Survivor ICU Stay"
+        }
+      ],
+      "name": "ICU Admission",
+      "reason": "htn"
+    },
+    "Survivor ICU Stay": {
+      "type": "SetAttribute",
+      "attribute": "htn_icu_days",
+      "direct_transition": "ICU First Day",
+      "range": {
+        "low": 2,
+        "high": 9
+      },
+      "name": "Survivor ICU Stay"
+    },
+    "Non Survivor ICU Stay": {
+      "type": "SetAttribute",
+      "attribute": "htn_icu_days",
+      "range": {
+        "low": 4,
+        "high": 12
+      },
+      "direct_transition": "ICU First Day",
+      "name": "Non Survivor ICU Stay"
+    },
+    "ICU Day Begin": {
+      "type": "Counter",
+      "attribute": "htn_admission_days",
+      "action": "increment",
+      "direct_transition": "ICU Set Daily Labs",
+      "name": "ICU Day Begin"
+    },
+    "ICU Day End": {
+      "type": "Counter",
+      "attribute": "htn_icu_days",
+      "action": "decrement",
+      "conditional_transition": [
+        {
+          "condition": {
+            "condition_type": "Attribute",
+            "attribute": "htn_icu_days",
+            "operator": ">",
+            "value": 0
+          },
+          "transition": "ICU Next Day"
+        },
+        {
+          "transition": "Extubation_Check",
+          "condition": {
+            "condition_type": "Attribute",
+            "attribute": "htn_death",
+            "operator": "==",
+            "value": false
+          }
+        },
+        {
+          "transition": "Wait For End"
+        }
+      ],
+      "name": "ICU Day End"
+    },
+    "ICU Labs": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/measurements_daily",
+      "conditional_transition": [
+        {
+          "transition": "ICU Frequent Labs",
+          "condition": {
+            "condition_type": "Attribute",
+            "attribute": "htn_all_labs",
+            "operator": "==",
+            "value": true
+          }
+        },
+        {
+          "transition": "Next_Time"
+        }
+      ],
+      "name": "ICU Labs"
+    },
+    "ICU Set Daily Labs": {
+      "type": "Simple",
+      "conditional_transition": [
+        {
+          "transition": "ICU Daily Lab Values Non Survivor",
+          "condition": {
+            "condition_type": "Attribute",
+            "attribute": "htn_death",
+            "operator": "==",
+            "value": true
+          }
+        },
+        {
+          "transition": "ICU Daily Lab Values Survivor"
+        }
+      ],
+      "name": "ICU Set Daily Labs"
+    },
+    "ICU Daily Lab Values Non Survivor": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/nonsurvivor_lab_values",
+      "direct_transition": "ICU Labs",
+      "name": "ICU Daily Lab Values Non Survivor"
+    },
+    "ICU Daily Lab Values Survivor": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/survivor_lab_values",
+      "direct_transition": "ICU Labs",
+      "name": "ICU Daily Lab Values Survivor"
+    },
+    "ICU Next Day": {
+      "type": "Delay",
+      "direct_transition": "ICU Day Begin",
+      "exact": {
+        "quantity": 1,
+        "unit": "days"
+      },
+      "name": "ICU Next Day"
+    },
+    "ICU Procedures": {
+      "type": "Simple",
+      "conditional_transition": [
+        {
+          "transition": "Ventilation",
+          "condition": {
+            "condition_type": "Or",
+            "conditions": [
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": "65710008",
+                    "display": "Acute respiratory failure (disorder)"
+                  }
+                ]
+              },
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": "76571007",
+                    "display": "Septic shock (disorder)"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "transition": "ICU Oxygen"
+        }
+      ],
+      "name": "ICU Procedures"
+    },
+    "ICU Medications": {
+      "type": "Simple",
+      "direct_transition": "Clinical_Trial_Medications",
+      "name": "ICU Medications"
+    },
+    "ICU Supplies": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/supplies_icu",
+      "direct_transition": "ICU Day End",
+      "name": "ICU Supplies"
+    },
+    "Ventilation": {
+      "type": "Procedure",
+      "codes": [
+        {
+          "system": "SNOMED-CT",
+          "code": "26763009",
+          "display": "Controlled ventilation procedure and therapy, initiation and management (procedure)",
+          "value_set": ""
+        }
+      ],
+      "reason": "Ventilator Reason",
+      "direct_transition": "Dialysis Check",
+      "name": "Ventilation"
+    },
+    "ICU First Day": {
+      "type": "Simple",
+      "direct_transition": "Intubation Check",
+      "name": "ICU First Day"
+    },
+    "Intubation Supplies": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/supplies_intubation",
+      "direct_transition": "Intubation",
+      "name": "Intubation Supplies"
+    },
+    "Intubation": {
+      "type": "Procedure",
+      "codes": [
+        {
+          "system": "SNOMED-CT",
+          "code": "112798008",
+          "display": "Insertion of endotracheal tube (procedure)",
+          "value_set": ""
+        }
+      ],
+      "duration": {
+        "low": 20,
+        "high": 30,
+        "unit": "minutes"
+      },
+      "reason": "Ventilator Reason",
+      "direct_transition": "Remove_Laryngoscope",
+      "name": "Intubation"
+    },
+    "ICU Oxygen": {
+      "type": "Procedure",
+      "codes": [
+        {
+          "system": "SNOMED-CT",
+          "code": "371908008",
+          "display": "Oxygen administration by mask (procedure)",
+          "value_set": ""
+        }
+      ],
+      "reason": "Hypoxemia",
+      "direct_transition": "Dialysis Check",
+      "name": "ICU Oxygen"
+    },
+    "Daily_Acetaminophen_for_Fever_ICU": {
+      "type": "MedicationOrder",
+      "codes": [
+        {
+          "system": "RxNorm",
+          "code": "198440",
+          "display": "Acetaminophen 500 MG Oral Tablet",
+          "value_set": ""
+        }
+      ],
+      "administration": true,
+      "direct_transition": "ICU Supplies",
+      "name": "Daily_Acetaminophen_for_Fever_ICU"
+    },
+    "Extubation_Check": {
+      "type": "Simple",
+      "conditional_transition": [
+        {
+          "transition": "Extubation",
+          "condition": {
+            "condition_type": "PriorState",
+            "name": "Intubation"
+          }
+        },
+        {
+          "transition": "Discharge from ICU"
+        }
+      ],
+      "name": "Extubation_Check"
+    },
+    "Extubation": {
+      "type": "Procedure",
+      "codes": [
+        {
+          "system": "SNOMED-CT",
+          "code": "271280005",
+          "display": "Removal of endotracheal tube (procedure)",
+          "value_set": ""
+        }
+      ],
+      "duration": {
+        "low": 20,
+        "high": 40,
+        "unit": "minutes"
+      },
+      "direct_transition": "Reclaim Ventilator",
+      "name": "Extubation"
+    },
+    "Wait For End": {
+      "type": "Delay",
+      "direct_transition": "Reclaim Ventilator at Death",
+      "range": {
+        "low": 1,
+        "high": 8,
+        "unit": "hours"
+      },
+      "name": "Wait For End"
+    },
+    "Vasopressor A": {
+      "type": "MedicationOrder",
+      "codes": [
+        {
+          "system": "RxNorm",
+          "code": "242969",
+          "display": "4 ML Norepinephrine 1 MG/ML Injection",
+          "value_set": ""
+        }
+      ],
+      "direct_transition": "Vasopressor B",
+      "administration": true,
+      "reason": "Septic Shock",
+      "name": "Vasopressor A"
+    },
+    "Vasopressor B": {
+      "type": "MedicationOrder",
+      "codes": [
+        {
+          "system": "RxNorm",
+          "code": "2103182",
+          "display": "1 ML Vasopressin (USP) 20 UNT/ML Injection",
+          "value_set": ""
+        }
+      ],
+      "administration": true,
+      "direct_transition": "Daily_Acetaminophen_for_Fever_ICU",
+      "reason": "Septic Shock",
+      "name": "Vasopressor B"
+    },
+    "ICU Frequent Labs": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/measurements_frequent",
+      "direct_transition": "Skip_Next_Time",
+      "name": "ICU Frequent Labs"
+    },
+    "Next_Time": {
+      "type": "SetAttribute",
+      "attribute": "htn_all_labs",
+      "value": true,
+      "direct_transition": "Check for Clots ICU",
+      "name": "Next_Time"
+    },
+    "Skip_Next_Time": {
+      "type": "SetAttribute",
+      "attribute": "htn_all_labs",
+      "value": true,
+      "direct_transition": "Check for Clots ICU",
+      "name": "Skip_Next_Time"
+    },
+    "Reclaim Ventilator": {
+      "type": "DeviceEnd",
+      "direct_transition": "Discharge from ICU",
+      "referenced_by_attribute": "covid19_ventilator",
+      "name": "Reclaim Ventilator"
+    },
+    "Reclaim Ventilator at Death": {
+      "type": "DeviceEnd",
+      "direct_transition": "End Encounter at Death",
+      "referenced_by_attribute": "htn_ventilator",
+      "name": "Reclaim Ventilator at Death"
+    },
+    "End Encounter at Death": {
+      "type": "EncounterEnd",
+      "name": "End Encounter at Death",
+      "direct_transition": "Terminal"
+    },
+    "Clinical_Trial_Medications": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/medications",
+      "conditional_transition": [
+        {
+          "condition": {
+            "condition_type": "Or",
+            "conditions": [
+              {
+                "condition_type": "Attribute",
+                "attribute": "asthma_condition",
+                "operator": "is not nil"
+              },
+              {
+                "condition_type": "Or",
+                "conditions": [
+                  {
+                    "condition_type": "Attribute",
+                    "attribute": "copd_variant",
+                    "operator": "is not nil"
+                  },
+                  {
+                    "condition_type": "Active Condition",
+                    "codes": [
+                      {
+                        "system": "SNOMED-CT",
+                        "code": 267036007,
+                        "display": "Dyspnea (finding)"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "transition": "Albuterol Administration"
+        },
+        {
+          "transition": "Treat Bacterial Infection"
+        }
+      ],
+      "name": "Clinical_Trial_Medications"
+    },
+    "Remove_Laryngoscope": {
+      "type": "DeviceEnd",
+      "direct_transition": "Chest X Ray to confirm intubation",
+      "referenced_by_attribute": "covid19_laryngoscope",
+      "name": "Remove_Laryngoscope"
+    },
+    "Check for Clots ICU": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/diagnose_blood_clot",
+      "direct_transition": "Treat Clots ICU",
+      "name": "Check for Clots ICU"
+    },
+    "Treat Clots ICU": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/treat_blood_clot",
+      "direct_transition": "Check for Bacterial Infection",
+      "name": "Treat Clots ICU"
+    },
+    "Dialysis Check": {
+      "type": "Simple",
+      "conditional_transition": [
+        {
+          "condition": {
+            "condition_type": "Or",
+            "conditions": [
+              {
+                "condition_type": "And",
+                "conditions": [
+                  {
+                    "condition_type": "Attribute",
+                    "attribute": "ckd",
+                    "operator": "is not nil"
+                  },
+                  {
+                    "condition_type": "Attribute",
+                    "attribute": "ckd",
+                    "operator": ">=",
+                    "value": 4
+                  }
+                ]
+              },
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": 40095003,
+                    "display": "Injury of kidney (disorder)"
+                  }
+                ]
+              }
+            ]
+          },
+          "transition": "Dialysis Machine"
+        },
+        {
+          "transition": "ICU Medications"
+        }
+      ],
+      "name": "Dialysis Check"
+    },
+    "Hemodialysis": {
+      "type": "Procedure",
+      "codes": [
+        {
+          "system": "SNOMED-CT",
+          "code": 302497006,
+          "display": "Hemodialysis (procedure)",
+          "value_set": ""
+        }
+      ],
+      "duration": {
+        "low": 2,
+        "high": 4,
+        "unit": "hours"
+      },
+      "direct_transition": "Dialysis Machine Stop",
+      "name": "Hemodialysis"
+    },
+    "Dialysis Machine": {
+      "type": "Device",
+      "code": {
+        "system": "SNOMED-CT",
+        "code": 36965003,
+        "display": "Hemodialysis machine, device (physical object)"
+      },
+      "direct_transition": "Hemodialysis",
+      "name": "Dialysis Machine"
+    },
+    "Dialysis Machine Stop": {
+      "type": "DeviceEnd",
+      "direct_transition": "ICU Medications",
+      "device": "Dialysis Machine",
+      "name": "Dialysis Machine Stop"
+    },
+    "Discharge from ICU": {
+      "type": "EncounterEnd",
+      "name": "Discharge from ICU",
+      "direct_transition": "Terminal"
+    },
+    "Albuterol Administration": {
+      "type": "Simple",
+      "conditional_transition": [
+        {
+          "transition": "Albuterol Nebulizer on Ventilation",
+          "condition": {
+            "condition_type": "Or",
+            "conditions": [
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": 65710008,
+                    "display": "Acute respiratory failure (disorder)"
+                  }
+                ]
+              },
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": 76571007,
+                    "display": "Septic shock (disorder)"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "transition": "Metered_Dose_Inhaler_ICU"
+        }
+      ],
+      "name": "Albuterol Administration"
+    },
+    "Metered_Dose_Inhaler_ICU": {
+      "type": "MedicationOrder",
+      "codes": [
+        {
+          "system": "RxNorm",
+          "code": "2123111",
+          "display": "NDA020503 200 ACTUAT Albuterol 0.09 MG/ACTUAT Metered Dose Inhaler",
+          "value_set": ""
+        }
+      ],
+      "administration": true,
+      "reason": "Hypoxemia",
+      "prescription": {
+        "dosage": {
+          "amount": 4,
+          "frequency": 1,
+          "period": 4,
+          "unit": "hours"
+        },
+        "duration": {
+          "quantity": 1,
+          "unit": "days"
+        }
+      },
+      "direct_transition": "Treat Bacterial Infection",
+      "name": "Metered_Dose_Inhaler_ICU"
+    },
+    "Albuterol Nebulizer on Ventilation": {
+      "type": "MedicationOrder",
+      "codes": [
+        {
+          "system": "RxNorm",
+          "code": 245314,
+          "display": "Albuterol 5 MG/ML Inhalation Solution",
+          "value_set": ""
+        }
+      ],
+      "administration": true,
+      "reason": "Hypoxemia",
+      "direct_transition": "Treat Bacterial Infection",
+      "prescription": {
+        "dosage": {
+          "amount": 1,
+          "frequency": 1,
+          "period": 4,
+          "unit": "hours"
+        },
+        "duration": {
+          "quantity": 1,
+          "unit": "days"
+        }
+      },
+      "name": "Albuterol Nebulizer on Ventilation"
+    },
+    "Intubation Check": {
+      "type": "Simple",
+      "conditional_transition": [
+        {
+          "transition": "Intubation Supplies",
+          "condition": {
+            "condition_type": "Or",
+            "conditions": [
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": 65710008,
+                    "display": "Acute respiratory failure (disorder)"
+                  }
+                ]
+              },
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": 76571007,
+                    "display": "Septic shock (disorder)"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "transition": "ICU Day Begin"
+        }
+      ],
+      "name": "Intubation Check"
+    },
+    "Chest X Ray to confirm intubation": {
+      "type": "Procedure",
+      "codes": [
+        {
+          "system": "SNOMED-CT",
+          "code": "399208008",
+          "display": "Plain chest X-ray (procedure)",
+          "value_set": ""
+        }
+      ],
+      "duration": {
+        "low": 15,
+        "high": 45,
+        "unit": "minutes"
+      },
+      "conditional_transition": [
+        {
+          "transition": "Intubation Supplies",
+          "condition": {
+            "condition_type": "Or",
+            "conditions": [
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": 65710008,
+                    "display": "Acute respiratory failure (disorder)"
+                  }
+                ]
+              },
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": 76571007,
+                    "display": "Septic shock (disorder)"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "transition": "ICU Day Begin"
+        }
+      ],
+      "direct_transition": "ICU Day Begin",
+      "name": "Chest X Ray to confirm intubation"
+    },
+    "Check for Bacterial Infection": {
+      "type": "CallSubmodule",
+      "submodule": "hypertension/diagnose_bacterial_infection",
+      "direct_transition": "ICU Procedures",
+      "name": "Check for Bacterial Infection"
+    },
+    "Treat Bacterial Infection": {
+      "type": "Simple",
+      "conditional_transition": [
+        {
+          "transition": "Vancomycin",
+          "condition": {
+            "condition_type": "Or",
+            "conditions": [
+              {
+                "condition_type": "Attribute",
+                "attribute": "htn_bacterial_infection",
+                "operator": "is not nil"
+              },
+              {
+                "condition_type": "Active Condition",
+                "codes": [
+                  {
+                    "system": "SNOMED-CT",
+                    "code": 76571007,
+                    "display": "Septic shock (disorder)"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "transition": "Check for Septic Shock"
+        }
+      ],
+      "name": "Treat Bacterial Infection"
+    },
+    "Check for Septic Shock": {
+      "type": "Simple",
+      "conditional_transition": [
+        {
+          "transition": "Vasopressor A",
+          "condition": {
+            "condition_type": "Active Condition",
+            "codes": [
+              {
+                "system": "SNOMED-CT",
+                "code": 76571007,
+                "display": "Septic shock (disorder)"
+              }
+            ]
+          }
+        },
+        {
+          "transition": "Daily_Acetaminophen_for_Fever_ICU"
+        }
+      ],
+      "name": "Check for Septic Shock"
+    },
+    "Vancomycin": {
+      "type": "MedicationOrder",
+      "codes": [
+        {
+          "system": "RxNorm",
+          "code": 1807513,
+          "display": "vancomycin 1000 MG Injection",
+          "value_set": ""
+        }
+      ],
+      "direct_transition": "piperacillin-tazobactam",
+      "reason": "covid19_bacterial_infection",
+      "administration": true,
+      "name": "Vancomycin"
+    },
+    "piperacillin-tazobactam": {
+      "type": "MedicationOrder",
+      "codes": [
+        {
+          "system": "RxNorm",
+          "code": 1659149,
+          "display": "piperacillin 4000 MG / tazobactam 500 MG Injection",
+          "value_set": ""
+        }
+      ],
+      "reason": "covid19_bacterial_infection",
+      "direct_transition": "Check for Septic Shock",
+      "administration": true,
+      "prescription": {
+        "dosage": {
+          "amount": 1,
+          "frequency": 1,
+          "period": 1,
+          "unit": "days"
+        },
+        "duration": {
+          "quantity": 1,
+          "unit": "days"
+        },
+        "refills": 4
+      },
+      "remarks": [
+        "Every 6 hours."
+      ],
+      "name": "piperacillin-tazobactam"
+    }
+  },
+  "gmf_version": 1
+}
